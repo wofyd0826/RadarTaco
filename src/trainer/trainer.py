@@ -95,7 +95,7 @@ class RadarTacoTrainer:
             self.global_step += 1
             cur_lr = self.optimizer.param_groups[0]["lr"]
             if self.wandb is not None:
-                ld = {k: float(v) for k, v in losses.items() if torch.is_tensor(v)}
+                ld = {k: float(v.detach()) for k, v in losses.items() if torch.is_tensor(v)}
                 self.wandb.log_training_step(self.global_step, ld, cur_lr)
             if (it + 1) % int(self.cfg.training.log_interval) == 0:
                 logger.info(
