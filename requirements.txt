@@ -1,0 +1,13 @@
+torch>=2.1
+torchvision>=0.16
+hydra-core>=1.3
+omegaconf>=2.3
+wandb>=0.16
+opencv-python
+pillow
+numpy
+einops
+timm
+tqdm
+matplotlib
+nuscenes-devkit

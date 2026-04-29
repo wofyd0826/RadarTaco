@@ -1,0 +1,9 @@
+# GNN radar encoder (paper-faithful) — DEFAULT
+name: radartaco
+radar_encoder: gnn          # 'gnn' or 'mlp'
+k_neighbors: 20              # DGCNN-style kNN size
+mlp_hidden: 128              # only used when radar_encoder='mlp'
+a_l: [48.0, 32.0, 16.0]      # paper §4.2 + supp Table 9 — radar-centered window widths
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true

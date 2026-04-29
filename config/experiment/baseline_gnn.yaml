@@ -1,0 +1,11 @@
+# @package _global_
+# Paper-faithful single-stage baseline on nuScenes only with the GNN encoder.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+wandb:
+  name: baseline_gnn
+  tags: [baseline, gnn, single-stage]

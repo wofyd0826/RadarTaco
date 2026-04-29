@@ -1,0 +1,15 @@
+name: hypersim
+data_root: /data/public/Hypersim/train
+split_train: /workspace/Marigold/data_split/hypersim_depth/filename_list_train_filtered.txt
+dataset_type: hypersim
+radar_simulation: augmented
+num_radar_points_min: 30
+num_radar_points_max: 60
+depth_noise_std: 0.5
+train_resize_hw: [480, 640]
+batch_size: 12
+num_workers: 4
+max_radar_points: 128
+max_depth: 80.0
+min_depth: 1.0e-3
+train_crop_hw: null

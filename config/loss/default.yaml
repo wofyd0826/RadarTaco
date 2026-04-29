@@ -1,0 +1,7 @@
+# Paper Eq. 5 — L1 against sparse LiDAR + λ·L1 against dense GT.
+lam: 1.0
+w_smooth: 0.0
+w_sim_grad: 0.0
+w_sim_smooth: 0.0
+smoothness_rgb_grad_weight: 1.0
+grad_scales: 4

@@ -1,0 +1,27 @@
+# Hydra root config. Override via experiment configs:
+#   python scripts/train.py +experiment=baseline_gnn
+
+defaults:
+  - model: radartaco_gnn
+  - dataset: nuscenes
+  - training: default
+  - loss: default
+  - _self_
+
+wandb:
+  enabled: true
+  project: radartaco
+  entity: null
+  name: null
+  group: null
+  tags: []
+  notes: null
+
+hydra:
+  run:
+    dir: ${training.output_dir}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${training.output_dir}/multirun/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: false

@@ -1,0 +1,17 @@
+# @package _global_
+# Two-stage pipeline. Run twice:
+#   stage 1: training.stage=sim_pretrain   training=sim_pretrain   dataset=mixed dataset.sim.ratio_real=0.0 dataset.sim.ratio_sim=1.0
+#   stage 2: training.stage=nuscenes_finetune  training=nuscenes_finetune  training.load_weights_from=output/sim_pretrain/<run>/best.pt
+#
+# This file is just the convenient default that defaults to stage 2 (the
+# downstream fine-tuning step). For stage 1 override `training=sim_pretrain`
+# and `dataset=mixed` with sim-only ratios.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: nuscenes_finetune
+  - override /loss: default
+
+wandb:
+  name: sim_pretrain_finetune
+  tags: [two-stage, gnn]

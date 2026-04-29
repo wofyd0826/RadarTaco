@@ -1,0 +1,19 @@
+# Stage 2 of the two-stage pipeline: fine-tune on nuScenes from a sim-pretrained ckpt.
+# Use with experiment=sim_pretrain_finetune training.stage=nuscenes_finetune
+#   training.load_weights_from=output/sim_pretrain/<run>/best.pt
+stage: nuscenes_finetune
+batch_size: 12
+epochs: 50
+lr: 5.0e-5                   # smaller LR for fine-tuning
+lr_decay_step: 10
+lr_decay_amount: 5.0e-6
+weight_decay: 0.0
+amp: true
+seed: 42
+log_interval: 50
+val_subset_size: 1000
+output_dir: ./output/nuscenes_finetune
+resume_from: null
+load_weights_from: null      # set on the CLI: training.load_weights_from=output/sim_pretrain/.../best.pt
+save_epoch_snapshots: [10, 25, 50]
+viz_n_samples: 4

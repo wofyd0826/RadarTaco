@@ -1,0 +1,9 @@
+# Real samples → paper Eq. 5 loss.
+# Sim samples → L1 + multi-scale gradient matching + edge-aware smoothness.
+# Routed per-sample by `is_sim` flag in src/loss/factory.py.
+lam: 1.0
+w_smooth: 0.0
+w_sim_grad: 0.5
+w_sim_smooth: 1.0e-3
+smoothness_rgb_grad_weight: 1.0
+grad_scales: 4

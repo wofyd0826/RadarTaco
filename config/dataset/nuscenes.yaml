@@ -1,0 +1,23 @@
+name: nuscenes
+data_root: /data/public/nuScenes/derived
+split_train: /data/public/nuScenes/derived/splits/train.txt
+split_val:   /data/public/nuScenes/derived/splits/val.txt
+split_test:  /data/public/nuScenes/derived/splits/test.txt
+night_ids_file: /data/public/nuScenes/derived/splits/night_ids.txt
+# 'depth_interp' = Delaunay-interp dense GT (default).
+# 'depth_acc'    = paper-faithful 80+80 accumulated sparse GT.
+dense_gt_dir: depth_interp
+max_radar_points: 128
+max_depth: 80.0
+min_depth: 1.0e-3
+# Train at full 900×1600 per paper. Set e.g. [450, 800] for smaller GPUs.
+train_resize_hw: null
+train_crop_hw: null
+num_workers: 4
+batch_size: 12
+
+# multi-loader sim mixing — disabled here; enable via dataset/mixed.yaml
+sim:
+  enabled: false
+  ratio_real: 1.0
+  ratio_sim: 0.0

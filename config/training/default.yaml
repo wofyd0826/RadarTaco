@@ -1,0 +1,17 @@
+# Single-stage training (paper §4.2 hyperparams).
+stage: single                # 'single' / 'sim_pretrain' / 'nuscenes_finetune'
+batch_size: 12
+epochs: 50
+lr: 1.0e-4
+lr_decay_step: 10
+lr_decay_amount: 1.0e-5
+weight_decay: 0.0
+amp: true
+seed: 42
+log_interval: 50
+val_subset_size: 1000
+output_dir: ./output
+resume_from: null            # ckpt path to resume from (loads optimizer + step)
+load_weights_from: null      # ckpt path for weights-only load (used by 2-stage stage-2)
+save_epoch_snapshots: [10, 25, 50]
+viz_n_samples: 4             # number of validation samples logged as images each epoch

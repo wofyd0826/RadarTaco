@@ -1,0 +1,18 @@
+# Stage 1 of the two-stage pipeline: pretrain on simulation only.
+# Use with experiment=sim_pretrain_finetune training.stage=sim_pretrain.
+stage: sim_pretrain
+batch_size: 12
+epochs: 30
+lr: 1.0e-4
+lr_decay_step: 10
+lr_decay_amount: 2.0e-5
+weight_decay: 0.0
+amp: true
+seed: 42
+log_interval: 50
+val_subset_size: 500
+output_dir: ./output/sim_pretrain
+resume_from: null
+load_weights_from: null
+save_epoch_snapshots: [15, 30]
+viz_n_samples: 4

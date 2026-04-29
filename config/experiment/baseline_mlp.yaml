@@ -1,0 +1,11 @@
+# @package _global_
+# MLP-encoder ablation (paper §3.1 baseline).
+defaults:
+  - override /model: radartaco_mlp
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+wandb:
+  name: baseline_mlp
+  tags: [baseline, mlp, single-stage]

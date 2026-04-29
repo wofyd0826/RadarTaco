@@ -1,0 +1,9 @@
+# MLP radar encoder ablation
+name: radartaco
+radar_encoder: mlp
+k_neighbors: 20              # ignored for MLP
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true

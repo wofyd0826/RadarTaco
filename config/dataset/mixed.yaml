@@ -1,0 +1,36 @@
+# Multi-loader: mix nuScenes (real) with Hypersim + vKITTI2 (sim).
+# Used by experiments/mixed_with_aux.yaml.
+name: mixed
+data_root: /data/public/nuScenes/derived
+split_train: /data/public/nuScenes/derived/splits/train.txt
+split_val:   /data/public/nuScenes/derived/splits/val.txt
+split_test:  /data/public/nuScenes/derived/splits/test.txt
+night_ids_file: /data/public/nuScenes/derived/splits/night_ids.txt
+dense_gt_dir: depth_interp
+max_radar_points: 128
+max_depth: 80.0
+min_depth: 1.0e-3
+train_resize_hw: null
+train_crop_hw: null
+num_workers: 4
+batch_size: 12
+
+sim:
+  enabled: true
+  ratio_real: 0.7              # weight for nuScenes
+  ratio_sim: 0.3               # total weight for the union of sim datasets
+  radar_simulation: augmented
+  num_radar_points_min: 30
+  num_radar_points_max: 60
+  depth_noise_std: 0.5
+  train_resize_hw: [480, 640]
+  hypersim:
+    enabled: true
+    data_root: /data/public/Hypersim/train
+    split_train: /workspace/Marigold/data_split/hypersim_depth/filename_list_train_filtered.txt
+    dataset_type: hypersim
+  vkitti2:
+    enabled: true
+    data_root: /data/public/vkitti2
+    split_train: /workspace/Marigold/data_split/vkitti_depth/vkitti_train.txt
+    dataset_type: vkitti2

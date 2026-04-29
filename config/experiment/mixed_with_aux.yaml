@@ -1,0 +1,12 @@
+# @package _global_
+# Mixed batch (nuScenes + Hypersim + vKITTI2) with sim-only edge/grad aux loss.
+# Real samples → paper Eq. 5 loss; sim samples → L1 + grad match + edge-aware smoothness.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: mixed
+  - override /training: default
+  - override /loss: sim_aux
+
+wandb:
+  name: mixed_with_aux
+  tags: [mixed, gnn, sim-aux]
