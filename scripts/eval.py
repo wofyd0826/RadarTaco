@@ -70,7 +70,7 @@ def main(cfg: DictConfig) -> None:
     ds = NuScenesRadarDepthDataset(
         data_root=cfg.dataset.data_root,
         split_file=split_file,
-        dense_gt_dir=cfg.dataset.get("dense_gt_dir", "depth_interp"),
+        dense_gt_dir=cfg.dataset.get("dense_gt_dir", "depth_acc"),
         radar_3d_dir=cfg.dataset.get("radar_3d_dir", "radar_3d"),
         night_ids_file=cfg.dataset.get("night_ids_file", None),
         max_radar_points=int(cfg.dataset.max_radar_points),
@@ -118,13 +118,13 @@ def main(cfg: DictConfig) -> None:
         is_n = bool(batch["is_night"][0].item()) if torch.is_tensor(batch["is_night"]) else False
         m = evaluator.evaluate_sample(pn, gn, mn, is_night=is_n)
         all_metrics.append(m)
-        per_sample_rows.append({
-            "sample_id": batch["sample_id"][0],
-            "is_night": is_n,
-            "mae_0_80m": m["overall"]["0-80m"]["mae"],
-            "rmse_0_80m": m["overall"]["0-80m"]["rmse"],
-            "mae_far_50_80m": m["far"]["50-80m"]["mae"],
-        })
+        row = {"sample_id": batch["sample_id"][0], "is_night": is_n}
+        # flatten all category × range × metric combos to one column each
+        for cat, ranges in m.items():
+            for rname, mets in ranges.items():
+                for k, v in mets.items():
+                    row[f"{cat}/{rname}/{k}"] = v
+        per_sample_rows.append(row)
         if save_every > 0 and i % save_every == 0:
             rgb = rgb_to_uint8(batch["rgb_norm"][0].cpu().numpy())
             radar_pts = batch["radar_points"][0].cpu().numpy()
@@ -151,14 +151,25 @@ def main(cfg: DictConfig) -> None:
                 f.write(line + "\n")
             f.write("\n")
 
-    if cfg.get("save_per_sample_csv", False):
+    # Always save per-sample CSV — useful for downstream analysis
+    # (failure-mode digging, day/night gap, far-range tail).
+    if per_sample_rows:
         import csv
+        # union of keys across rows (per_range bins differ per sample if a
+        # sample has no points in a far bin, that key is absent).
+        fieldnames = []
+        seen = set()
+        for r in per_sample_rows:
+            for k in r:
+                if k not in seen:
+                    seen.add(k); fieldnames.append(k)
         path = os.path.join(out_dir, "per_sample.csv")
         with open(path, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=list(per_sample_rows[0].keys()))
+            w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             w.writeheader()
             for r in per_sample_rows:
                 w.writerow(r)
+        logger.info(f"wrote {path} ({len(per_sample_rows)} rows × {len(fieldnames)} cols)")
 
     head = agg["overall"].get("0-80m", {})
     head100 = agg["overall"].get("0-100m", {})
