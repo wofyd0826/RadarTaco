@@ -9,7 +9,7 @@ def colorize_depth(
     valid_mask: Optional[np.ndarray] = None,
     vmin: float = 0.0,
     vmax: float = 80.0,
-    cmap: str = "magma",
+    cmap: str = "viridis",
 ) -> np.ndarray:
     """Map a [H, W] depth map to a [H, W, 3] uint8 RGB image via matplotlib cmap."""
     import matplotlib.cm as cm
