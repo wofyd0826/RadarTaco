@@ -16,15 +16,19 @@
 #   ONLY=baseline,dark_aug bash scripts/sweep.sh   # subset
 #   SKIP_TRAIN=1 bash scripts/sweep.sh          # eval-only (use existing ckpts)
 #   WANDB=false bash scripts/sweep.sh           # disable wandb
-#   SWEEP_DIR=/path/to/dir bash scripts/sweep.sh   # custom output root
+#   OUTPUT_ROOT=output bash scripts/sweep.sh    # custom output root
 #
-# Layout
-#   $SWEEP_DIR/
-#     sweep.log
-#     <mode>/<mode>/                       (train.py auto-suffix per ckpt)
-#       config.yaml  last.pt  best.pt  epoch_N.pt
-#       eval_test/
-#         metrics.json  summary.txt  viz/
+# Layout (flat — one directory per experiment)
+#   $OUTPUT_ROOT/
+#     baseline/
+#       config.yaml  best.pt  last.pt  epoch_N.pt
+#       eval_test/{metrics.json, summary.txt, viz/}
+#     sim50_mixed/
+#     sim50_vkitti2_only/
+#     inv_depth/
+#     multi_scale/
+#     dark_aug/
+#     _sweep_log_<tag>.log
 
 set -uo pipefail
 trap 'echo "[interrupted] cleaning up..."; exit 130' INT
@@ -37,9 +41,9 @@ BATCH_SIZE="${BATCH_SIZE:-}"
 SKIP_TRAIN="${SKIP_TRAIN:-0}"
 WANDB="${WANDB:-true}"
 SWEEP_TAG="${SWEEP_TAG:-$(date +%Y%m%d_%H%M%S)}"
-SWEEP_DIR="${SWEEP_DIR:-output/sweep_$SWEEP_TAG}"
-mkdir -p "$SWEEP_DIR"
-LOG="$SWEEP_DIR/sweep.log"
+OUTPUT_ROOT="${OUTPUT_ROOT:-output}"
+mkdir -p "$OUTPUT_ROOT"
+LOG="$OUTPUT_ROOT/_sweep_log_${SWEEP_TAG}.log"
 
 # ────────────────────────────────────────────────────── per-mode definitions ──
 # format: NAME|hydra-args
@@ -76,7 +80,8 @@ declare -a SUMMARY=()
 {
   echo "════════════════════════════════════════════════════════════════"
   echo "  RadarTaco sweep — $SWEEP_TAG"
-  echo "  output:      $SWEEP_DIR"
+  echo "  output_root: $OUTPUT_ROOT"
+  echo "  log:         $LOG"
   echo "  epochs:      ${EPOCHS:-<config default>}"
   echo "  batch_size:  ${BATCH_SIZE:-<config default>}"
   echo "  skip_train:  $SKIP_TRAIN"
@@ -99,23 +104,24 @@ for entry in "${EXPERIMENTS[@]}"; do
     continue
   fi
 
-  EXP_BASE="$SWEEP_DIR/$NAME"
+  # train.py auto-resolves output_dir = $OUTPUT_ROOT/$wandb.name
+  # → produces a flat tree: $OUTPUT_ROOT/<NAME>/best.pt
+  EXP_DIR="$OUTPUT_ROOT/$NAME"
 
   {
     echo ""
     echo "────────────────────────────────────────────────────────────────"
     echo "  [$NAME]  $(date '+%H:%M:%S')"
     echo "  args: $ARGS"
+    echo "  dir:  $EXP_DIR"
     echo "────────────────────────────────────────────────────────────────"
   } | tee -a "$LOG"
 
   # ───── train ─────
   if [ "$SKIP_TRAIN" -ne 1 ]; then
     echo "[$NAME] train…" | tee -a "$LOG"
-    # `wandb.name` doubles as the run-dir leaf (train.py auto-resolves
-    # output_dir = $training.output_dir/$wandb.name).
     if python scripts/train.py $ARGS \
-        training.output_dir="$EXP_BASE" \
+        training.output_dir="$OUTPUT_ROOT" \
         wandb.name="$NAME" \
         wandb.group="$SWEEP_TAG" \
         $EXTRA_ARGS 2>&1 | tee -a "$LOG"; then
@@ -130,11 +136,10 @@ for entry in "${EXPERIMENTS[@]}"; do
     echo "[$NAME] train skipped (SKIP_TRAIN=1)" | tee -a "$LOG"
   fi
 
-  # ───── locate best.pt (might have a numeric suffix if dir existed) ─────
-  CKPT=$(find "$EXP_BASE" -maxdepth 3 -name "best.pt" 2>/dev/null \
-         | sort | tail -1)
+  # ───── locate best.pt (latest if numeric suffix exists from re-runs) ─────
+  CKPT=$(ls -dt "$EXP_DIR"*/best.pt 2>/dev/null | head -1)
   if [ -z "$CKPT" ]; then
-    echo "[$NAME] no best.pt under $EXP_BASE — skipping eval" | tee -a "$LOG"
+    echo "[$NAME] no best.pt under ${EXP_DIR}* — skipping eval" | tee -a "$LOG"
     SUMMARY+=("$NAME | NO CHECKPOINT")
     continue
   fi
@@ -160,19 +165,18 @@ for entry in "${EXPERIMENTS[@]}"; do
     LINE=$(python - <<PY
 import json
 m = json.load(open("$EVAL_DIR/metrics.json"))
-ovr = m.get("overall", {}).get("0-80m", {})
-ovr100 = m.get("overall", {}).get("0-100m", {})
+ovr  = m.get("overall", {}).get("0-80m", {})
+o100 = m.get("overall", {}).get("0-100m", {})
 far  = m.get("far", {}).get("50-80m", {})
-far100 = m.get("far", {}).get("80-100m", {})
+f100 = m.get("far", {}).get("80-100m", {})
 night = m.get("night", {}).get("0-80m", {})
 day   = m.get("day", {}).get("0-80m", {})
-def fmt(d, k, p="{:.1f}"):
-    v = d.get(k)
-    return p.format(v) if v is not None else "n/a"
+def fmt(d, k):
+    v = d.get(k); return f"{v:.1f}" if v is not None else "n/a"
 print(
     f"0-80 MAE={fmt(ovr,'mae')}/RMSE={fmt(ovr,'rmse')}  "
-    f"0-100 MAE={fmt(ovr100,'mae')}  "
-    f"far50-80 MAE={fmt(far,'mae')}  far80-100 MAE={fmt(far100,'mae')}  "
+    f"0-100 MAE={fmt(o100,'mae')}  "
+    f"far50-80 MAE={fmt(far,'mae')}  far80-100 MAE={fmt(f100,'mae')}  "
     f"day MAE={fmt(day,'mae')}  night MAE={fmt(night,'mae')}"
 )
 PY
@@ -194,6 +198,6 @@ done
   echo ""
   echo "  finished:    $(date)"
   echo "  full log:    $LOG"
-  echo "  outputs:     $SWEEP_DIR"
+  echo "  outputs:     $OUTPUT_ROOT/{baseline,sim50_mixed,sim50_vkitti2_only,inv_depth,multi_scale,dark_aug}/"
   echo "════════════════════════════════════════════════════════════════"
 } | tee -a "$LOG"

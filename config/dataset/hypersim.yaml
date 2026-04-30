@@ -6,7 +6,7 @@ radar_simulation: augmented
 num_radar_points_min: 30
 num_radar_points_max: 60
 depth_noise_std: 0.5
-train_resize_hw: [480, 640]
+train_resize_hw: null            # Hypersim native: 768 × 1024
 batch_size: 12
 num_workers: 4
 max_radar_points: 128

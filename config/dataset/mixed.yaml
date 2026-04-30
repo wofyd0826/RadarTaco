@@ -39,7 +39,8 @@ sim:
   num_radar_points_min: 30
   num_radar_points_max: 60
   depth_noise_std: 0.5
-  train_resize_hw: [480, 640]
+  train_resize_hw: null              # null = use each sim source's native res
+                                     # Hypersim 768×1024, vKITTI2 375×1242
   hypersim:
     enabled: true
     data_root: /data/public/Hypersim/train
