@@ -119,9 +119,15 @@ def main(cfg: DictConfig) -> None:
         m = evaluator.evaluate_sample(pn, gn, mn, is_night=is_n)
         all_metrics.append(m)
         row = {"sample_id": batch["sample_id"][0], "is_night": is_n}
-        # flatten all category × range × metric combos to one column each
+        # flatten all category × range × metric combos. evaluate_sample
+        # returns {"overall": {...}, "far": {...}, ..., "is_night": bool},
+        # so skip non-dict scalar fields.
         for cat, ranges in m.items():
+            if not isinstance(ranges, dict):
+                continue
             for rname, mets in ranges.items():
+                if not isinstance(mets, dict):
+                    continue
                 for k, v in mets.items():
                     row[f"{cat}/{rname}/{k}"] = v
         per_sample_rows.append(row)
