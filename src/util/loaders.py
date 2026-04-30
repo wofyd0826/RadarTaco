@@ -125,7 +125,9 @@ def build_loaders(cfg) -> Tuple[object, DataLoader]:
     probs = [ratio_real] + [sim_each] * len(sim_loaders)
     logger.info("mixed loader: nuScenes=%.2f + %s",
                 ratio_real, ", ".join(f"{n}={sim_each:.2f}" for n, _ in sim_loaders))
-    return MultiDatasetLoader(loaders, probs), val_loader
+    # primary_idx=0 → epoch length anchored to nuScenes pass-through, so
+    # sim-mixing does not inflate epoch time (see multi_loader.py docstring).
+    return MultiDatasetLoader(loaders, probs, primary_idx=0), val_loader
 
 
 def build_viz_sampler(val_loader: DataLoader, n: int) -> Optional[list]:
