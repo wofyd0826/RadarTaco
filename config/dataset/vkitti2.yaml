@@ -2,7 +2,17 @@ name: vkitti2
 data_root: /data/public/vkitti2
 split_train: /workspace/Marigold/data_split/vkitti_depth/vkitti_train.txt
 dataset_type: vkitti2
+# Sampling modes:
+#   simple         uniform random over valid pixels
+#   augmented      nuScenes y-bias + Gaussian depth noise
+#   semantic_aware (vKITTI2 only) y-bias × per-pixel reflectivity weight
+#                  derived from classSegmentation PNG → points concentrate
+#                  on vehicles / poles / guard-rails (real radar surfaces)
 radar_simulation: augmented
+# Optional override of per-class reflectivity weights (semantic_aware mode).
+# Defaults from src/dataset/vkitti2_classes.py:VKITTI2_CLASSES.
+# Example: class_weights: {Car: 6.0, Building: 0.5}
+class_weights: null
 num_radar_points_min: 30
 num_radar_points_max: 60
 depth_noise_std: 0.5

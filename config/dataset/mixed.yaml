@@ -50,3 +50,7 @@ sim:
     data_root: /data/public/vkitti2
     split_train: /workspace/Marigold/data_split/vkitti_depth/vkitti_train.txt
     dataset_type: vkitti2
+    # Per-source override (otherwise inherit sim.radar_simulation).
+    # Set to "semantic_aware" to use classSegmentation-weighted sampling.
+    radar_simulation: null              # null = inherit from sim.radar_simulation
+    class_weights: null                 # null = use default reflectivity weights

@@ -1,0 +1,33 @@
+# @package _global_
+# Mixed batch (nuScenes + Hypersim + vKITTI2) where vKITTI2 uses semantic-
+# aware radar sampling: per-pixel reflectivity weights derived from the
+# official classSegmentation PNG concentrate synthetic radar points on
+# vehicles / poles / guard-rails — closer to where real automotive
+# mmWave radar actually returns are.
+#
+# Hypersim has no class map in our setup, so it silently falls back to
+# the default `augmented` y-bias sampling.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: mixed
+  - override /training: default
+  - override /loss: sim_aux
+
+dataset:
+  sim:
+    enabled: true
+    ratio_real: 0.7
+    ratio_sim: 0.3
+    radar_simulation: augmented        # default for sim sources …
+    vkitti2:
+      enabled: true
+      radar_simulation: semantic_aware # … overridden for vKITTI2
+      # Tune per-class reflectivity here, e.g.:
+      # class_weights:
+      #   Car:        6.0
+      #   GuardRail:  5.0
+      #   Building:   1.0
+
+wandb:
+  name: mixed_semantic_radar
+  tags: [mixed, gnn, sim-aux, semantic-radar]

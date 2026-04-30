@@ -74,8 +74,7 @@ def _build_sim_loaders(cfg):
     common = _common_dataset_kwargs(ds_cfg)
     bsz = int(cfg.training.batch_size)
     photometric_aug = build_photometric_aug(ds_cfg.get("photometric_aug", None))
-    sim_kw = dict(
-        radar_simulation=sim_cfg.radar_simulation,
+    base_sim_kw = dict(
         num_radar_points=(int(sim_cfg.num_radar_points_min),
                           int(sim_cfg.num_radar_points_max)),
         depth_noise_std=float(sim_cfg.depth_noise_std),
@@ -89,18 +88,24 @@ def _build_sim_loaders(cfg):
         if not os.path.isdir(sub.data_root):
             logger.warning(f"{name}: data_root missing → skipping")
             continue
+        # per-source override > sim-level default
+        sim_mode = sub.get("radar_simulation", None) or sim_cfg.radar_simulation
+        cls_w = sub.get("class_weights", None)
+        cls_w = dict(cls_w) if cls_w else None
         ds = SimRadarDepthDataset(
             data_root=sub.data_root,
             split_file=sub.split_train,
             dataset_type=sub.dataset_type,
+            radar_simulation=sim_mode,
+            class_weights=cls_w,
             resize_to_hw=resize, augmentation=True,
             photometric_aug=photometric_aug,
-            **common, **sim_kw,
+            **common, **base_sim_kw,
         )
+        logger.info(f"{name}: {len(ds)} samples (mode={sim_mode})")
         loader = DataLoader(ds, batch_size=bsz, shuffle=True,
                             num_workers=int(ds_cfg.num_workers),
                             pin_memory=True, drop_last=True)
-        logger.info(f"{name}: {len(ds)} samples")
         out.append((name, loader))
     return out
 
