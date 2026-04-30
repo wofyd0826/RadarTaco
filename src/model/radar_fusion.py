@@ -20,7 +20,21 @@ import torch.nn.functional as F
 
 
 class RadarCenteredAttention(nn.Module):
-    """Multi-head Radar-centered cross-attention with horizontal-window mask."""
+    """Multi-head Radar-centered cross-attention with horizontal-window mask.
+
+    Attention recording (for visualization):
+        Set `module.record_attention = True` on any instance to switch from
+        the fast SDPA path to a manual softmax that caches the resulting
+        attention weights on `self.last_attn` (B, heads, H, W, K) and the
+        keep mask on `self.last_keep` (B, H, W, K). Toggle off for training
+        / fast inference. Memory is proportional to B·heads·H·W·K, so use
+        small input resolutions and/or deeper layers for large K.
+    """
+
+    record_attention: bool = False
+    last_attn: torch.Tensor | None = None
+    last_keep: torch.Tensor | None = None
+    last_hw: tuple | None = None
 
     def __init__(self, ch: int, kv_dim: int, heads: int, a_l: float) -> None:
         super().__init__()
@@ -72,7 +86,17 @@ class RadarCenteredAttention(nn.Module):
         attn_bias = torch.zeros_like(safe_keep, dtype=q.dtype)
         attn_bias = attn_bias.masked_fill(~safe_keep, float("-inf")).unsqueeze(1)
 
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
+        if self.record_attention:
+            # Manual path: compute & cache softmax(QK^T / √d) for visualization.
+            scores = (q @ k.transpose(-1, -2)) * self.scale            # (B, h, HW, K)
+            scores = scores + attn_bias                                 # broadcast head dim
+            attn = torch.softmax(scores, dim=-1)
+            out = attn @ v                                              # (B, h, HW, d)
+            self.last_attn = attn.detach().reshape(B, self.heads, H, W, K).cpu()
+            self.last_keep = attn_keep.detach().reshape(B, H, W, K).cpu()
+            self.last_hw = (H, W)
+        else:
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
         out = out.transpose(1, 2).reshape(B, H * W, C)
         out = self.out_proj(out)
         # Pixels with no valid radar in window → zero contribution (residual passthrough).
