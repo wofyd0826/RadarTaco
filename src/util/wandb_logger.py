@@ -23,13 +23,15 @@ class WandbLogger:
             return
         wandb_cfg = cfg.get("wandb", {})
         self._cleanup_local_runs(max_keep=4)
+        def _s(v):
+            return None if v is None else str(v)
         self.run = wandb.init(
-            project=wandb_cfg.get("project", "radartaco"),
-            entity=wandb_cfg.get("entity", None),
-            name=wandb_cfg.get("name", None),
-            group=wandb_cfg.get("group", None),
-            tags=list(wandb_cfg.get("tags", [])),
-            notes=wandb_cfg.get("notes", None),
+            project=_s(wandb_cfg.get("project", "radartaco")),
+            entity=_s(wandb_cfg.get("entity", None)),
+            name=_s(wandb_cfg.get("name", None)),
+            group=_s(wandb_cfg.get("group", None)),
+            tags=[str(t) for t in wandb_cfg.get("tags", [])],
+            notes=_s(wandb_cfg.get("notes", None)),
             config=OmegaConf.to_container(cfg, resolve=True),
             reinit=True,
         )
