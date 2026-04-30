@@ -26,9 +26,9 @@ photometric_aug:
   contrast_range:   [0.5, 0.9]       # compression toward the local mean
   noise_std_range:  [0.0, 0.05]      # additive Gaussian noise (post-rescale)
   apply_to_night:   false            # don't darken samples already tagged night
-# 'depth_interp' = Delaunay-interp dense GT (default).
-# 'depth_acc'    = paper-faithful 80+80 accumulated sparse GT.
-dense_gt_dir: depth_interp
+# 'depth_acc'    = paper-faithful 80+80 accumulated sparse GT (default, matches Eq.5).
+# 'depth_interp' = Delaunay-interp dense GT (alternative).
+dense_gt_dir: depth_acc
 radar_3d_dir:  radar_3d            # sidecar (N,3) ego (front,left,up) — see scripts/preprocess_radar_3d.py
 max_radar_points: 128
 max_depth: 100.0

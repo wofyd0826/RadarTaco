@@ -21,7 +21,7 @@ photometric_aug:
   contrast_range:   [0.5, 0.9]
   noise_std_range:  [0.0, 0.05]
   apply_to_night:   false
-dense_gt_dir: depth_interp
+dense_gt_dir: depth_acc
 radar_3d_dir:  radar_3d
 max_radar_points: 128
 max_depth: 100.0
