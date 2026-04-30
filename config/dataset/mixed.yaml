@@ -2,10 +2,16 @@
 # Used by experiments/mixed_with_aux.yaml.
 name: mixed
 data_root: /data/public/nuScenes/derived
-split_train: /data/public/nuScenes/derived/splits/train.txt
-split_val:   /data/public/nuScenes/derived/splits/val.txt
-split_test:  /data/public/nuScenes/derived/splits/test.txt
-night_ids_file: /data/public/nuScenes/derived/splits/night_ids.txt
+split_train:     /data/public/nuScenes/derived/splits/train.txt
+split_val:       /data/public/nuScenes/derived/splits/val.txt
+split_test:      /data/public/nuScenes/derived/splits/test.txt
+split_train_day:   /data/public/nuScenes/derived/splits/train_day.txt
+split_train_night: /data/public/nuScenes/derived/splits/train_night.txt
+split_val_day:     /data/public/nuScenes/derived/splits/val_day.txt
+split_val_night:   /data/public/nuScenes/derived/splits/val_night.txt
+split_test_day:    /data/public/nuScenes/derived/splits/test_day.txt
+split_test_night:  /data/public/nuScenes/derived/splits/test_night.txt
+night_ids_file:    /data/public/nuScenes/derived/splits/night_ids.txt
 dense_gt_dir: depth_interp
 max_radar_points: 128
 max_depth: 80.0

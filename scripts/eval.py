@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Standalone evaluation: load a checkpoint, run on the val/test split, dump metrics + viz."""
+"""Standalone evaluation: load a checkpoint, run on the test split (default),
+dump metrics + viz.
+
+Pipeline convention:
+    train  → train.txt        (scripts/train.py)
+    val    → val.txt           (per-epoch validation inside train.py)
+    test   → test.txt          (this script — final evaluation)
+
+Override `eval_split=val` (or `eval_split=val_day` / `val_night`) to
+evaluate on a different split.
+
+Usage:
+    python scripts/eval.py checkpoint=output/<run>/best.pt
+    python scripts/eval.py checkpoint=output/<run>/best.pt eval_split=val
+    python scripts/eval.py checkpoint=output/<run>/best.pt eval_split=val_night
+"""
 import json
 import logging
 import os
@@ -37,10 +52,20 @@ def main(cfg: DictConfig) -> None:
     viz_dir = os.path.join(out_dir, "viz")
     os.makedirs(viz_dir, exist_ok=True)
 
-    split = cfg.get("eval_split", "val")
-    assert split in ("val", "test", "val_day", "val_night"), split
+    # Default to the held-out test split for final evaluation. Use
+    #   eval_split=val           — same data the trainer validates on
+    #   eval_split=val_day       — day-only subset of val
+    #   eval_split=val_night     — night-only subset of val (Dark scenario eval)
+    split = cfg.get("eval_split", "test")
+    assert split in ("train", "val", "test",
+                     "train_day", "train_night",
+                     "val_day", "val_night",
+                     "test_day", "test_night"), split
     split_file = getattr(cfg.dataset, f"split_{split}", None) or \
         os.path.join(cfg.dataset.data_root, "splits", f"{split}.txt")
+    if not os.path.exists(split_file):
+        raise SystemExit(f"split file not found: {split_file}")
+    logger.info(f"eval split: {split} → {split_file}")
 
     ds = NuScenesRadarDepthDataset(
         data_root=cfg.dataset.data_root,
