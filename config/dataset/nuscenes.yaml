@@ -20,7 +20,7 @@ night_ids_file:    /data/public/nuScenes/derived/splits/night_ids.txt
 # experiment override. Skips already-night samples unless apply_to_night.
 photometric_aug:
   enabled: false
-  prob: 0.3                          # fraction of training samples to darken
+  prob: 0.5                          # fraction of training samples to darken
   gamma_range:      [1.5, 3.0]       # γ > 1 darkens midtones
   brightness_range: [0.3, 0.7]       # multiplicative scale toward black
   contrast_range:   [0.5, 0.9]       # compression toward the local mean
