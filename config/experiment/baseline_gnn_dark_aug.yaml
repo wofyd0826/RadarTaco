@@ -1,0 +1,27 @@
+# @package _global_
+# Photometric "night-like" augmentation on day frames during training.
+# Forces the radar encoder + fusion to remain useful when RGB features
+# are degraded by under-exposure / sensor noise / contrast loss — a direct
+# proxy for the night-time deployment regime where camera SNR drops.
+# 30% of training samples are darkened (gamma 1.5-3, brightness 0.3-0.7,
+# contrast 0.5-0.9, mild noise). Already-night samples are left alone so
+# the original night distribution is preserved as supervision signal.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  photometric_aug:
+    enabled: true
+    prob: 0.3
+    gamma_range:      [1.5, 3.0]
+    brightness_range: [0.3, 0.7]
+    contrast_range:   [0.5, 0.9]
+    noise_std_range:  [0.0, 0.05]
+    apply_to_night:   false
+
+wandb:
+  name: baseline_gnn_dark_aug
+  tags: [baseline, gnn, single-stage, dark-aug]

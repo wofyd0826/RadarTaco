@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader, Subset
 
 from src.dataset.multi_loader import MultiDatasetLoader
 from src.dataset.nuscenes import NuScenesRadarDepthDataset
+from src.dataset.photometric import build_from_cfg as build_photometric_aug
 from src.dataset.sim import SimRadarDepthDataset
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,9 @@ def _build_nuscenes_loaders(cfg) -> Tuple[DataLoader, DataLoader]:
     train_resize = tuple(ds_cfg.train_resize_hw) if ds_cfg.get("train_resize_hw") else None
     train_crop = tuple(ds_cfg.train_crop_hw) if ds_cfg.get("train_crop_hw") else None
     night_ids_file = ds_cfg.get("night_ids_file", None)
+    photometric_aug = build_photometric_aug(ds_cfg.get("photometric_aug", None))
+    if photometric_aug is not None:
+        logger.info("photometric night-like augmentation: enabled")
 
     train_ds = NuScenesRadarDepthDataset(
         data_root=ds_cfg.data_root,
@@ -36,7 +40,7 @@ def _build_nuscenes_loaders(cfg) -> Tuple[DataLoader, DataLoader]:
         radar_3d_dir=ds_cfg.get("radar_3d_dir", "radar_3d"),
         night_ids_file=night_ids_file,
         resize_to_hw=train_resize, crop_to_hw=train_crop,
-        augmentation=True, **common,
+        augmentation=True, photometric_aug=photometric_aug, **common,
     )
     val_ds = NuScenesRadarDepthDataset(
         data_root=ds_cfg.data_root,
@@ -44,7 +48,7 @@ def _build_nuscenes_loaders(cfg) -> Tuple[DataLoader, DataLoader]:
         dense_gt_dir=ds_cfg.get("dense_gt_dir", "depth_interp"),
         radar_3d_dir=ds_cfg.get("radar_3d_dir", "radar_3d"),
         night_ids_file=night_ids_file,
-        resize_to_hw=None, augmentation=False, **common,
+        resize_to_hw=None, augmentation=False, photometric_aug=None, **common,
     )
     n_val = cfg.training.get("val_subset_size", 1000)
     if n_val and n_val < len(val_ds):
@@ -69,6 +73,7 @@ def _build_sim_loaders(cfg):
         return []
     common = _common_dataset_kwargs(ds_cfg)
     bsz = int(cfg.training.batch_size)
+    photometric_aug = build_photometric_aug(ds_cfg.get("photometric_aug", None))
     sim_kw = dict(
         radar_simulation=sim_cfg.radar_simulation,
         num_radar_points=(int(sim_cfg.num_radar_points_min),
@@ -89,6 +94,7 @@ def _build_sim_loaders(cfg):
             split_file=sub.split_train,
             dataset_type=sub.dataset_type,
             resize_to_hw=resize, augmentation=True,
+            photometric_aug=photometric_aug,
             **common, **sim_kw,
         )
         loader = DataLoader(ds, batch_size=bsz, shuffle=True,

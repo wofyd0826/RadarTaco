@@ -48,6 +48,7 @@ class BaseRadarDepthDataset(Dataset, ABC):
         min_depth: float = 1e-3,
         augmentation: bool = True,
         lr_flip_p: float = 0.5,
+        photometric_aug=None,                                # NightLikeAugmentation or None
     ):
         super().__init__()
         self.max_radar_points = max_radar_points
@@ -57,6 +58,7 @@ class BaseRadarDepthDataset(Dataset, ABC):
         self.min_depth = min_depth
         self.augmentation = augmentation
         self.lr_flip_p = lr_flip_p
+        self.photometric_aug = photometric_aug
 
     @abstractmethod
     def __len__(self) -> int: ...
@@ -171,4 +173,13 @@ class BaseRadarDepthDataset(Dataset, ABC):
             radar[m, CH_XPIX] = W - 1 - radar[m, CH_XPIX]
             radar[m, CH_LEFT] = -radar[m, CH_LEFT]
             sample["radar_points"] = radar
+
+        # Photometric "night-like" augmentation. By default skips already-
+        # night samples (apply_to_night=False on the augmenter). Touches
+        # only `rgb_norm` — depth GT, masks, and radar are unchanged.
+        if self.photometric_aug is not None:
+            is_night_flag = bool(sample["is_night"]) if "is_night" in sample else False
+            sample["rgb_norm"] = self.photometric_aug(
+                sample["rgb_norm"], is_night=is_night_flag,
+            )
         return sample
