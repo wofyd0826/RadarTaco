@@ -26,6 +26,8 @@ class RadarTaco(nn.Module):
         pretrained_image_encoder: bool = True,
         output_mode: str = "metric",                  # 'metric' or 'inverse'
         min_depth_clip: float = 0.5,                  # used by 'inverse' mode
+        multi_scale: bool = False,                    # deep supervision aux heads
+        multi_scale_levels: Tuple[int, ...] = (2, 4, 8, 16),
     ) -> None:
         super().__init__()
         self.image_encoder = ImageEncoder(pretrained=pretrained_image_encoder)
@@ -47,6 +49,8 @@ class RadarTaco(nn.Module):
             max_depth=max_depth,
             output_mode=output_mode,
             min_depth_clip=min_depth_clip,
+            multi_scale=multi_scale,
+            multi_scale_levels=tuple(multi_scale_levels),
         )
 
     def forward(

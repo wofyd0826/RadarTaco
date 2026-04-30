@@ -1,0 +1,15 @@
+# Paper Eq. 5 + multi-scale auxiliary L1 against the dense GT.
+# Per-level weights default to a gentle "final-dominant" decay so the
+# coarsest scales remain auxiliary regularizers, not competitors.
+lam: 1.0
+w_smooth: 0.0
+w_sim_grad: 0.0
+w_sim_smooth: 0.0
+w_multi_scale: 0.5                       # overall scale of the aux term
+multi_scale_per_level_weights:
+  depth_s2:  1.0                         # 1/2 — closest to final
+  depth_s4:  0.5
+  depth_s8:  0.25
+  depth_s16: 0.125                       # 1/16 — coarsest, lightest weight
+smoothness_rgb_grad_weight: 1.0
+grad_scales: 4

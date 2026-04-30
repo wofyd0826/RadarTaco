@@ -9,3 +9,5 @@ attn_heads: 4
 pretrained_image_encoder: true
 output_mode: metric
 min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]

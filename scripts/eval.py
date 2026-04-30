@@ -94,6 +94,8 @@ def main(cfg: DictConfig) -> None:
         pretrained_image_encoder=False,
         output_mode=str(cfg.model.get("output_mode", "metric")),
         min_depth_clip=float(cfg.model.get("min_depth_clip", 0.5)),
+        multi_scale=bool(cfg.model.get("multi_scale", False)),
+        multi_scale_levels=tuple(cfg.model.get("multi_scale_levels", (2, 4, 8, 16))),
     ).to(device).eval()
     ckpt = torch.load(cfg.checkpoint, map_location=device)
     model.load_state_dict(ckpt["model"], strict=True)

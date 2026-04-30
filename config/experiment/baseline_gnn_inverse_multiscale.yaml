@@ -1,0 +1,19 @@
+# @package _global_
+# Combines Option B (inverse-depth output) with Option A (multi-scale
+# auxiliary supervision). Both are independent levers; this experiment
+# turns both on to test whether they stack.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: multi_scale
+
+model:
+  output_mode: inverse
+  min_depth_clip: 0.5
+  multi_scale: true
+  multi_scale_levels: [2, 4, 8, 16]
+
+wandb:
+  name: baseline_gnn_inverse_multiscale
+  tags: [baseline, gnn, single-stage, inverse-depth, multi-scale]

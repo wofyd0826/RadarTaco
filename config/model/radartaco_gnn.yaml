@@ -15,3 +15,9 @@ pretrained_image_encoder: true
 #             saturation at far distances).
 output_mode: metric
 min_depth_clip: 0.5             # only used by output_mode=inverse
+# Deep supervision via auxiliary heads at coarser decoder scales. When
+# enabled the decoder returns a dict during training; eval/inference still
+# returns just the final-scale tensor (no caller-side change). Pair this
+# with loss.w_multi_scale > 0 to actually use the aux outputs in training.
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]    # 1/2, 1/4, 1/8, 1/16 strides

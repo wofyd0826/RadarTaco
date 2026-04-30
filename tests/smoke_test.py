@@ -46,8 +46,10 @@ def _fake_batch(B: int, H: int, W: int, K: int, n_sim: int = 0):
     }
 
 
-def _smoke_for_encoder(name: str, output_mode: str = "metric"):
-    print(f"--- encoder: {name}  output_mode: {output_mode} ---")
+def _smoke_for_encoder(name: str, output_mode: str = "metric",
+                       multi_scale: bool = False):
+    print(f"--- encoder: {name}  output_mode: {output_mode}"
+          f"  multi_scale: {multi_scale} ---")
     model = RadarTaco(
         radar_encoder_name=name,
         max_depth=100.0,
@@ -57,30 +59,58 @@ def _smoke_for_encoder(name: str, output_mode: str = "metric"):
         pretrained_image_encoder=False,
         output_mode=output_mode,
         min_depth_clip=0.5,
+        multi_scale=multi_scale,
+        multi_scale_levels=(2, 4, 8, 16),
     )
     n_p = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"  params: {n_p:.2f}M")
 
     H, W, K = 64, 96, 32
     batch = _fake_batch(B=2, H=H, W=W, K=K, n_sim=1)
-    pred = model(batch["rgb_norm"], batch["radar_points"], batch["radar_mask"])
-    assert pred.shape == (2, 1, H, W), f"unexpected pred shape: {pred.shape}"
-    assert torch.isfinite(pred).all(), "NaN/Inf in pred"
-    print(f"  forward OK: pred shape {tuple(pred.shape)}, range [{pred.min():.2f}, {pred.max():.2f}]")
 
-    loss_fn = ComposedLoss(lam=1.0, w_sim_grad=0.5, w_sim_smooth=1e-3)
+    # Training-mode forward exercises aux heads (returns dict when ms=on).
+    model.train()
+    pred = model(batch["rgb_norm"], batch["radar_points"], batch["radar_mask"])
+    if multi_scale:
+        assert isinstance(pred, dict), "multi_scale model.train() should return dict"
+        depth_main = pred["depth"]
+        aux_keys = [k for k in pred.keys() if k != "depth"]
+        assert set(aux_keys) == {"depth_s2", "depth_s4", "depth_s8", "depth_s16"}, aux_keys
+        print(f"  forward OK (training): aux scales = {aux_keys}, "
+              f"depth shape {tuple(depth_main.shape)}, "
+              f"range [{depth_main.min():.2f}, {depth_main.max():.2f}]")
+    else:
+        assert pred.shape == (2, 1, H, W)
+        assert torch.isfinite(pred).all()
+        depth_main = pred
+        print(f"  forward OK (training): pred shape {tuple(pred.shape)}, "
+              f"range [{pred.min():.2f}, {pred.max():.2f}]")
+
+    loss_fn = ComposedLoss(
+        lam=1.0, w_sim_grad=0.5, w_sim_smooth=1e-3,
+        w_multi_scale=(0.5 if multi_scale else 0.0),
+    )
     losses = loss_fn(pred, batch)
     losses["loss_total"].backward()
     has_grad = any(p.grad is not None and p.grad.abs().sum() > 0
                    for p in model.parameters())
     assert has_grad, "no gradient flowed"
-    print(f"  loss = {losses['loss_total'].item():.4f}  (lidar={losses['loss_lidar']:.4f}, "
-          f"dense={losses['loss_dense']:.4f}, sim_l1={losses['loss_sim_l1']:.4f}, "
-          f"sim_grad={losses['loss_sim_grad']:.4f})")
+    print(f"  loss = {losses['loss_total'].item():.4f}  "
+          f"(lidar={losses['loss_lidar']:.4f}, dense={losses['loss_dense']:.4f}, "
+          f"sim_l1={losses['loss_sim_l1']:.4f}, sim_grad={losses['loss_sim_grad']:.4f}, "
+          f"multi_scale={losses['loss_multi_scale']:.4f})")
+
+    # Eval-mode forward must always be a plain Tensor (no aux heads).
+    model.eval()
+    with torch.no_grad():
+        pred_eval = model(batch["rgb_norm"], batch["radar_points"], batch["radar_mask"])
+    assert isinstance(pred_eval, torch.Tensor), "model.eval() must return Tensor"
+    assert pred_eval.shape == (2, 1, H, W)
+    print(f"  forward OK (eval): tensor shape {tuple(pred_eval.shape)}")
 
     # 1-sample eval
     eva = DepthEvaluator(min_depth=1e-3, max_depth=100.0)
-    pn = pred[0, 0].detach().cpu().numpy()
+    pn = pred_eval[0, 0].detach().cpu().numpy()
     gn = batch["depth_gt_lidar"][0, 0].cpu().numpy()
     mn = batch["valid_mask_lidar"][0, 0].cpu().numpy().astype(bool)
     m = eva.evaluate_sample(pn, gn, mn, is_night=False)
@@ -95,9 +125,11 @@ def _smoke_for_encoder(name: str, output_mode: str = "metric"):
 def main():
     torch.manual_seed(0)
     np.random.seed(0)
-    _smoke_for_encoder("gnn", output_mode="metric")
-    _smoke_for_encoder("mlp", output_mode="metric")
-    _smoke_for_encoder("gnn", output_mode="inverse")
+    _smoke_for_encoder("gnn", output_mode="metric", multi_scale=False)
+    _smoke_for_encoder("mlp", output_mode="metric", multi_scale=False)
+    _smoke_for_encoder("gnn", output_mode="inverse", multi_scale=False)
+    _smoke_for_encoder("gnn", output_mode="metric", multi_scale=True)
+    _smoke_for_encoder("gnn", output_mode="inverse", multi_scale=True)
     print("\nALL SMOKE TESTS PASSED")
 
 

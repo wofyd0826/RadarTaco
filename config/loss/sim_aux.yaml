@@ -5,5 +5,7 @@ lam: 1.0
 w_smooth: 0.0
 w_sim_grad: 0.5
 w_sim_smooth: 1.0e-3
+w_multi_scale: 0.0
+multi_scale_per_level_weights: null
 smoothness_rgb_grad_weight: 1.0
 grad_scales: 4

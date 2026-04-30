@@ -84,6 +84,8 @@ def main(cfg: DictConfig) -> None:
         pretrained_image_encoder=bool(cfg.model.pretrained_image_encoder),
         output_mode=str(cfg.model.get("output_mode", "metric")),
         min_depth_clip=float(cfg.model.get("min_depth_clip", 0.5)),
+        multi_scale=bool(cfg.model.get("multi_scale", False)),
+        multi_scale_levels=tuple(cfg.model.get("multi_scale_levels", (2, 4, 8, 16))),
     )
     n_p = sum(p.numel() for p in model.parameters()) / 1e6
     logger.info(f"RadarTaco ({cfg.model.radar_encoder}): {n_p:.2f}M params")

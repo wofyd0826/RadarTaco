@@ -3,5 +3,8 @@ lam: 1.0
 w_smooth: 0.0
 w_sim_grad: 0.0
 w_sim_smooth: 0.0
+# Multi-scale aux loss (matches model.multi_scale). Set > 0 to enable.
+w_multi_scale: 0.0
+multi_scale_per_level_weights: null     # null = uniform across scales
 smoothness_rgb_grad_weight: 1.0
 grad_scales: 4

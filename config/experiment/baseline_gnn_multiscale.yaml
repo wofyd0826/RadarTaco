@@ -1,0 +1,18 @@
+# @package _global_
+# Multi-scale deep supervision (Option A): aux heads at scales 1/2, 1/4, 1/8,
+# 1/16 give direct gradient signal to deeper decoder/encoder layers and
+# typically improve long-range MAE. The aux predictions are bilinear-upsampled
+# to GT resolution and matched against the dense GT (paper's Dacc).
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: multi_scale
+
+model:
+  multi_scale: true
+  multi_scale_levels: [2, 4, 8, 16]
+
+wandb:
+  name: baseline_gnn_multiscale
+  tags: [baseline, gnn, single-stage, multi-scale]
