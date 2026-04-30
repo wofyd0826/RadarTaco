@@ -33,6 +33,7 @@ def _build_nuscenes_loaders(cfg) -> Tuple[DataLoader, DataLoader]:
         data_root=ds_cfg.data_root,
         split_file=ds_cfg.split_train,
         dense_gt_dir=ds_cfg.get("dense_gt_dir", "depth_interp"),
+        radar_3d_dir=ds_cfg.get("radar_3d_dir", "radar_3d"),
         night_ids_file=night_ids_file,
         resize_to_hw=train_resize, crop_to_hw=train_crop,
         augmentation=True, **common,
@@ -41,6 +42,7 @@ def _build_nuscenes_loaders(cfg) -> Tuple[DataLoader, DataLoader]:
         data_root=ds_cfg.data_root,
         split_file=ds_cfg.split_val,
         dense_gt_dir=ds_cfg.get("dense_gt_dir", "depth_interp"),
+        radar_3d_dir=ds_cfg.get("radar_3d_dir", "radar_3d"),
         night_ids_file=night_ids_file,
         resize_to_hw=None, augmentation=False, **common,
     )

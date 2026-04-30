@@ -164,7 +164,10 @@ class PyramidRadarFusion(nn.Module):
         radar_mask: torch.Tensor,
         image_w: int,
     ) -> List[torch.Tensor]:
-        radar_x = radar_points[:, :, 0]
+        # Channel 3 = x_pix (image-plane horizontal) for the radar-centered
+        # attention's horizontal-window mask. The 3D camera coords (channels
+        # 0..2) are already consumed upstream by the radar encoder.
+        radar_x = radar_points[:, :, 3]
         out = list(feats)
         for l in range(self.L):
             f_odd = feats[2 * l]

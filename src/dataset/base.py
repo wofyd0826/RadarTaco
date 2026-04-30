@@ -2,7 +2,16 @@
 
 All concrete datasets emit a unified output dict:
     rgb_norm           [3, H, W] float32, [-1, 1]
-    radar_points       [K_max, 3] float32, (x_pix, y_pix, depth) padded
+    radar_points       [K_max, 6] float32 — hybrid layout:
+                         (front, left, up, x_pix, y_pix, depth) padded
+                          ↑      ↑    ↑    ↑      ↑      ↑
+                            ego-frame 3D │    image plane   radar
+                            (meters)     │    (pixels)      depth (m)
+                                         │
+                          ego 3D consumed by encoders (GNN/MLP) for
+                          kNN and per-point features in metric units.
+                          x_pix (channel 3) is the only channel consumed
+                          by Radar-centered Attention's horizontal window.
     radar_mask         [K_max] bool
     depth_gt_lidar     [1, H, W] float32  (sparse single-frame LiDAR)
     depth_gt_dense     [1, H, W] float32  (dense or interp-densified)
@@ -21,6 +30,9 @@ import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import resize as tv_resize
+
+from .intrinsics import (CH_DEPTH, CH_FRONT, CH_LEFT, CH_UP,           # noqa: F401
+                         CH_XPIX, CH_YPIX, RADAR_CHANNELS)
 
 
 class BaseRadarDepthDataset(Dataset, ABC):
@@ -58,15 +70,23 @@ class BaseRadarDepthDataset(Dataset, ABC):
         return torch.from_numpy(rgb).permute(2, 0, 1)
 
     def _pad_radar_points(self, points: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Pad / sub-sample radar points to (K_max, RADAR_CHANNELS) and emit a mask.
+
+        `points` must be (N, RADAR_CHANNELS=6) — see module docstring for the
+        channel layout. Use `intrinsics.expand_to_6ch` to convert from the
+        legacy (N, 3) image-projected form.
+        """
+        if points.ndim != 2 or points.shape[1] != RADAR_CHANNELS:
+            raise ValueError(f"radar points must be (N, {RADAR_CHANNELS}); got {points.shape}")
         N = min(points.shape[0], self.max_radar_points)
-        padded = np.zeros((self.max_radar_points, 3), dtype=np.float32)
+        padded = np.zeros((self.max_radar_points, RADAR_CHANNELS), dtype=np.float32)
         mask = np.zeros(self.max_radar_points, dtype=bool)
         if N > 0:
             if points.shape[0] > self.max_radar_points:
                 idx = np.random.choice(points.shape[0], self.max_radar_points, replace=False)
                 points = points[idx]
                 N = self.max_radar_points
-            padded[:N] = points[:N, :3]
+            padded[:N] = points[:N]
             mask[:N] = True
         return torch.from_numpy(padded), torch.from_numpy(mask)
 
@@ -100,8 +120,11 @@ class BaseRadarDepthDataset(Dataset, ABC):
 
         radar = sample["radar_points"]
         m = sample["radar_mask"]
-        radar[m, 0] *= scale_x
-        radar[m, 1] *= scale_y
+        # Only the image-pixel channels (CH_XPIX, CH_YPIX) scale with resize.
+        # Camera-frame (xc, yc, zc) and depth are physical meter quantities
+        # and are invariant to image resampling.
+        radar[m, CH_XPIX] *= scale_x
+        radar[m, CH_YPIX] *= scale_y
         sample["radar_points"] = radar
         return sample
 
@@ -119,13 +142,15 @@ class BaseRadarDepthDataset(Dataset, ABC):
         radar = sample["radar_points"]
         mask = sample["radar_mask"].clone()
         if mask.any():
-            xs = radar[:, 0] - x0
-            ys = radar[:, 1] - y0
+            xs = radar[:, CH_XPIX] - x0
+            ys = radar[:, CH_YPIX] - y0
             in_bounds = (mask
                          & (xs >= 0) & (xs < target_w)
                          & (ys >= 0) & (ys < target_h))
-            radar[:, 0] = torch.where(in_bounds, xs, torch.zeros_like(xs))
-            radar[:, 1] = torch.where(in_bounds, ys, torch.zeros_like(ys))
+            # Shift image-pixel coords; metric channels (xc,yc,zc,depth) are
+            # invariant to crop. Drop out-of-bounds points entirely.
+            radar[:, CH_XPIX] = torch.where(in_bounds, xs, torch.zeros_like(xs))
+            radar[:, CH_YPIX] = torch.where(in_bounds, ys, torch.zeros_like(ys))
             radar[~in_bounds] = 0.0
             sample["radar_points"] = radar
             sample["radar_mask"] = in_bounds
@@ -140,6 +165,10 @@ class BaseRadarDepthDataset(Dataset, ABC):
                 sample[key] = sample[key].flip(-1)
             radar = sample["radar_points"]
             m = sample["radar_mask"]
-            radar[m, 0] = W - 1 - radar[m, 0]
+            # Flip image pixel x AND ego `left` (mirror across the vertical
+            # plane through the camera optical axis). front, up, depth are
+            # unchanged by a horizontal flip.
+            radar[m, CH_XPIX] = W - 1 - radar[m, CH_XPIX]
+            radar[m, CH_LEFT] = -radar[m, CH_LEFT]
             sample["radar_points"] = radar
         return sample

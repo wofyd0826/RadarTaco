@@ -34,6 +34,7 @@ def main(cfg: DictConfig) -> None:
             data_root=cfg.dataset.data_root,
             split_file=cfg.dataset.split_val,
             dense_gt_dir=cfg.dataset.get("dense_gt_dir", "depth_interp"),
+            radar_3d_dir=cfg.dataset.get("radar_3d_dir", "radar_3d"),
             night_ids_file=cfg.dataset.get("night_ids_file", None),
             max_radar_points=int(cfg.dataset.max_radar_points),
             max_depth=float(cfg.dataset.max_depth),

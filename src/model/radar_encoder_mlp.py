@@ -45,11 +45,14 @@ class MlpRadarEncoder(nn.Module):
 
     def forward(
         self,
-        radar_points: torch.Tensor,    # (B, K, 3)
+        radar_points: torch.Tensor,    # (B, K, 6) hybrid layout
         radar_mask: torch.Tensor,      # (B, K) bool
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-        # zero out padded coords so MLP doesn't see arbitrary values
-        x = radar_points * radar_mask[:, :, None].float()
+        # Use ego-frame 3D coords (front, left, up) — physically consistent
+        # meter units for per-point feature extraction. The image-pixel
+        # channels are reserved for the radar-centered attention mask.
+        coords3d = radar_points[:, :, :3]
+        x = coords3d * radar_mask[:, :, None].float()
         h = self.in_proj(x)                                                        # (B,K,hidden)
 
         N_list: List[torch.Tensor] = []

@@ -13,6 +13,7 @@ split_test_day:    /data/public/nuScenes/derived/splits/test_day.txt
 split_test_night:  /data/public/nuScenes/derived/splits/test_night.txt
 night_ids_file:    /data/public/nuScenes/derived/splits/night_ids.txt
 dense_gt_dir: depth_interp
+radar_3d_dir:  radar_3d
 max_radar_points: 128
 max_depth: 100.0
 min_depth: 1.0e-3

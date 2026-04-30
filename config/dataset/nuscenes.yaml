@@ -18,6 +18,7 @@ night_ids_file:    /data/public/nuScenes/derived/splits/night_ids.txt
 # 'depth_interp' = Delaunay-interp dense GT (default).
 # 'depth_acc'    = paper-faithful 80+80 accumulated sparse GT.
 dense_gt_dir: depth_interp
+radar_3d_dir:  radar_3d            # sidecar (N,3) ego (front,left,up) — see scripts/preprocess_radar_3d.py
 max_radar_points: 128
 max_depth: 100.0
 min_depth: 1.0e-3

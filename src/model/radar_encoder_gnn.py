@@ -177,10 +177,13 @@ class GnnRadarEncoder(nn.Module):
 
     def forward(
         self,
-        radar_points: torch.Tensor,   # (B, K, 3)
+        radar_points: torch.Tensor,   # (B, K, 6) hybrid (front, left, up, x_pix, y_pix, depth)
         radar_mask: torch.Tensor,     # (B, K) bool
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-        coords = radar_points.transpose(1, 2).contiguous()                         # (B,3,K)
+        # Use the ego-frame 3D channels (front, left, up) for kNN distance
+        # and node feature construction so that pairwise distances live in
+        # consistent meter units (image-pixel + depth would mix units).
+        coords = radar_points[:, :, :3].transpose(1, 2).contiguous()               # (B,3,K)
         coords = coords * radar_mask[:, None, :].float()
         knn_idx = masked_knn(coords, radar_mask, self.k)
         N_list, E_list = [], []

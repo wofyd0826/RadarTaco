@@ -35,13 +35,17 @@ def colorize_error(
 
 def overlay_radar_points(
     rgb_uint8: np.ndarray,
-    radar_points: np.ndarray,        # [K, 3]
+    radar_points: np.ndarray,        # [K, 6]  (xc, yc, zc, x_pix, y_pix, depth)
     radar_mask: np.ndarray,          # [K] bool
     vmin: float = 0.0,
-    vmax: float = 80.0,
+    vmax: float = 100.0,
     radius: int = 4,
 ) -> np.ndarray:
-    """Draw radar points on an RGB image, color-coded by depth."""
+    """Draw radar points on an RGB image, color-coded by depth.
+
+    Reads x_pix, y_pix, depth from the hybrid 6-channel layout (channels
+    3, 4, 5 — see src/dataset/intrinsics.py).
+    """
     import matplotlib.cm as cm
     import cv2  # type: ignore
 
@@ -51,7 +55,9 @@ def overlay_radar_points(
     for i in range(radar_points.shape[0]):
         if not bool(radar_mask[i]):
             continue
-        x, y, d = float(radar_points[i, 0]), float(radar_points[i, 1]), float(radar_points[i, 2])
+        x = float(radar_points[i, 3])     # x_pix
+        y = float(radar_points[i, 4])     # y_pix
+        d = float(radar_points[i, 5])     # depth (m)
         if not (0 <= x < W and 0 <= y < H):
             continue
         c = np.clip((d - vmin) / max(vmax - vmin, 1e-8), 0.0, 1.0)

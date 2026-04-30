@@ -14,11 +14,16 @@ from src.model.radartaco import RadarTaco                                    # n
 
 
 def _fake_batch(B: int, H: int, W: int, K: int, n_sim: int = 0):
+    """Build a fake 6-channel radar batch: (front, left, up, x_pix, y_pix, depth)."""
     rgb = torch.rand(B, 3, H, W) * 2.0 - 1.0
-    radar_pts = torch.zeros(B, K, 3)
-    radar_pts[:, :, 0] = torch.rand(B, K) * W
-    radar_pts[:, :, 1] = torch.rand(B, K) * H
-    radar_pts[:, :, 2] = torch.rand(B, K) * 80.0
+    radar_pts = torch.zeros(B, K, 6)
+    depth = torch.rand(B, K) * 75.0 + 5.0                   # depth ∈ [5, 80] m
+    radar_pts[:, :, 0] = depth                              # front (= depth)
+    radar_pts[:, :, 1] = (torch.rand(B, K) - 0.5) * 20.0    # left (±10 m lateral)
+    radar_pts[:, :, 2] = (torch.rand(B, K) - 0.5) * 4.0     # up   (small; 3D radar weak elevation)
+    radar_pts[:, :, 3] = torch.rand(B, K) * W               # x_pix
+    radar_pts[:, :, 4] = torch.rand(B, K) * H               # y_pix
+    radar_pts[:, :, 5] = depth                              # depth
     radar_mask = torch.ones(B, K, dtype=torch.bool)
     radar_mask[:, K // 2:] = False           # half padded → exercises masking
 

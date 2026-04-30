@@ -149,6 +149,7 @@ def main(cfg: DictConfig) -> None:
         data_root=cfg.dataset.data_root,
         split_file=split_file,
         dense_gt_dir=cfg.dataset.get("dense_gt_dir", "depth_interp"),
+        radar_3d_dir=cfg.dataset.get("radar_3d_dir", "radar_3d"),
         night_ids_file=cfg.dataset.get("night_ids_file", None),
         max_radar_points=int(cfg.dataset.max_radar_points),
         max_depth=float(cfg.dataset.max_depth),
@@ -238,7 +239,8 @@ def main(cfg: DictConfig) -> None:
         # normalize per-point so even small global scores show clearly
         if a_up.max() > 1e-8:
             a_up = a_up / a_up.max()
-        x, y = float(radar_pts_np[k, 0]), float(radar_pts_np[k, 1])
+        # channels 3, 4 = (x_pix, y_pix) in the 6-channel hybrid layout
+        x, y = float(radar_pts_np[k, 3]), float(radar_pts_np[k, 4])
         panel = _heatmap_overlay(rgb_img, a_up, (x, y))
         panels.append(panel)
 
