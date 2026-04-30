@@ -32,7 +32,7 @@ class BaseRadarDepthDataset(Dataset, ABC):
         max_radar_points: int = 128,
         resize_to_hw: Optional[Tuple[int, int]] = None,
         crop_to_hw: Optional[Tuple[int, int]] = None,
-        max_depth: float = 80.0,
+        max_depth: float = 100.0,
         min_depth: float = 1e-3,
         augmentation: bool = True,
         lr_flip_p: float = 0.5,

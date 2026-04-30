@@ -1,11 +1,15 @@
 """Depth metrics — RadarMarigold-compatible per-range bins + day/night split + far-only.
 
-Range schema:
-    overall   = [(0,50), (0,70), (0,80)]      cumulative ranges
-    per_range = [(0,10), (10,20), ..., (70,80)] disjoint 10-m bins (long-range visibility)
-    far       = [(50,80)]                       single far-only band (focus 4: long-range)
+Range schema (extended to 100 m for the long-range focus area):
+    overall   = [(0,50), (0,70), (0,80), (0,100)]   cumulative ranges
+    per_range = [(0,10), (10,20), ..., (90,100)]    disjoint 10-m bins (long-range visibility)
+    far       = [(50,80), (80,100)]                 far / very-far focus bands
     day       = same as overall, but evaluated on samples with is_night=False
     night     = same as overall, but evaluated on samples with is_night=True
+
+Note: nuScenes LiDAR's usable range is ~70-80 m so the 80-100 m bin will
+have far fewer GT pixels than the closer bins, but it is reported for the
+long-range focus area; treat low-sample bins with care.
 
 Metrics: mae, rmse, rel, delta1, delta2, delta3.
 """
@@ -14,12 +18,12 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 
-RANGE_BINS_OVERALL: List[Tuple[float, float]] = [(0, 50), (0, 70), (0, 80)]
+RANGE_BINS_OVERALL: List[Tuple[float, float]] = [(0, 50), (0, 70), (0, 80), (0, 100)]
 RANGE_BINS_FINE: List[Tuple[float, float]] = [
-    (0, 10), (10, 20), (20, 30), (30, 40),
-    (40, 50), (50, 60), (60, 70), (70, 80),
+    (0, 10), (10, 20), (20, 30), (30, 40), (40, 50),
+    (50, 60), (60, 70), (70, 80), (80, 90), (90, 100),
 ]
-RANGE_BINS_FAR: List[Tuple[float, float]] = [(50, 80)]
+RANGE_BINS_FAR: List[Tuple[float, float]] = [(50, 80), (80, 100)]
 ALL_METRIC_KEYS = ("mae", "rmse", "rel", "delta1", "delta2", "delta3")
 
 
@@ -48,7 +52,7 @@ def compute_range_metrics(
     valid_mask: np.ndarray,
     range_bins: List[Tuple[float, float]],
     min_depth: float = 1e-3,
-    max_depth: float = 80.0,
+    max_depth: float = 100.0,
     metric_keys: Optional[List[str]] = None,
 ) -> Dict[str, Dict[str, float]]:
     """Compute metrics across multiple depth ranges."""
@@ -71,7 +75,7 @@ class DepthEvaluator:
     def __init__(
         self,
         min_depth: float = 1e-3,
-        max_depth: float = 80.0,
+        max_depth: float = 100.0,
         range_bins_overall: Optional[List[Tuple[float, float]]] = None,
         range_bins_fine: Optional[List[Tuple[float, float]]] = None,
         range_bins_far: Optional[List[Tuple[float, float]]] = None,

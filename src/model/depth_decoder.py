@@ -45,7 +45,7 @@ class DepthDecoder(nn.Module):
         self,
         feat_channels: Tuple[int, ...] = (64, 64, 128, 256, 512, 512),
         decoder_channels: Tuple[int, ...] = (64, 64, 128, 128, 256, 256),
-        max_depth: float = 80.0,
+        max_depth: float = 100.0,
     ) -> None:
         super().__init__()
         assert len(feat_channels) == 6 and len(decoder_channels) == 6

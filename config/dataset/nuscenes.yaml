@@ -19,7 +19,7 @@ night_ids_file:    /data/public/nuScenes/derived/splits/night_ids.txt
 # 'depth_acc'    = paper-faithful 80+80 accumulated sparse GT.
 dense_gt_dir: depth_interp
 max_radar_points: 128
-max_depth: 80.0
+max_depth: 100.0
 min_depth: 1.0e-3
 # Train at full 900×1600 per paper. Set e.g. [450, 800] for smaller GPUs.
 train_resize_hw: null

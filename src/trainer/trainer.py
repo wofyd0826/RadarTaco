@@ -124,11 +124,14 @@ class RadarTacoTrainer:
                 all_metrics.append(self.evaluator.evaluate_sample(pn, gn, mn, is_night=is_n))
         agg = self.evaluator.aggregate_metrics(all_metrics)
         head = agg.get("overall", {}).get("0-80m", {})
+        head100 = agg.get("overall", {}).get("0-100m", {})
         far = agg.get("far", {}).get("50-80m", {})
+        far100 = agg.get("far", {}).get("80-100m", {})
         night = agg.get("night", {}).get("0-80m", {})
         logger.info(
-            f"VAL  0-80m  MAE={head.get('mae', float('nan')):.1f}  RMSE={head.get('rmse', float('nan')):.1f}  d1={head.get('delta1', float('nan')):.3f}  "
-            f"|  far(50-80m) MAE={far.get('mae', float('nan')):.1f}  "
+            f"VAL  0-80m MAE={head.get('mae', float('nan')):.1f}/RMSE={head.get('rmse', float('nan')):.1f}  "
+            f"|  0-100m MAE={head100.get('mae', float('nan')):.1f}/RMSE={head100.get('rmse', float('nan')):.1f}  "
+            f"|  far 50-80m MAE={far.get('mae', float('nan')):.1f}  80-100m MAE={far100.get('mae', float('nan')):.1f}  "
             f"|  night MAE={night.get('mae', float('nan')):.1f}"
         )
         return head, agg

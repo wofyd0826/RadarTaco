@@ -16,7 +16,7 @@ class RadarTaco(nn.Module):
     def __init__(
         self,
         radar_encoder_name: str = "gnn",
-        max_depth: float = 80.0,
+        max_depth: float = 100.0,
         max_radar_points: int = 128,
         k_neighbors: int = 20,
         a_l: Tuple[float, float, float] = (48.0, 32.0, 16.0),

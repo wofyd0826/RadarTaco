@@ -45,7 +45,7 @@ def _smoke_for_encoder(name: str):
     print(f"--- encoder: {name} ---")
     model = RadarTaco(
         radar_encoder_name=name,
-        max_depth=80.0,
+        max_depth=100.0,
         max_radar_points=32,
         radar_channels=(32, 64, 128),     # reduced for CPU smoke speed
         attn_heads=4,
@@ -72,7 +72,7 @@ def _smoke_for_encoder(name: str):
           f"sim_grad={losses['loss_sim_grad']:.4f})")
 
     # 1-sample eval
-    eva = DepthEvaluator(min_depth=1e-3, max_depth=80.0)
+    eva = DepthEvaluator(min_depth=1e-3, max_depth=100.0)
     pn = pred[0, 0].detach().cpu().numpy()
     gn = batch["depth_gt_lidar"][0, 0].cpu().numpy()
     mn = batch["valid_mask_lidar"][0, 0].cpu().numpy().astype(bool)

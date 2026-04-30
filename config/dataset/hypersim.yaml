@@ -10,6 +10,6 @@ train_resize_hw: [480, 640]
 batch_size: 12
 num_workers: 4
 max_radar_points: 128
-max_depth: 80.0
+max_depth: 100.0
 min_depth: 1.0e-3
 train_crop_hw: null
