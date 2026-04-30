@@ -24,6 +24,8 @@ class RadarTaco(nn.Module):
         attn_heads: int = 4,
         mlp_hidden: int = 128,
         pretrained_image_encoder: bool = True,
+        output_mode: str = "metric",                  # 'metric' or 'inverse'
+        min_depth_clip: float = 0.5,                  # used by 'inverse' mode
     ) -> None:
         super().__init__()
         self.image_encoder = ImageEncoder(pretrained=pretrained_image_encoder)
@@ -43,6 +45,8 @@ class RadarTaco(nn.Module):
         self.depth_decoder = DepthDecoder(
             feat_channels=self.image_encoder.feat_channels,
             max_depth=max_depth,
+            output_mode=output_mode,
+            min_depth_clip=min_depth_clip,
         )
 
     def forward(

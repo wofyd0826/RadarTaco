@@ -7,3 +7,11 @@ a_l: [48.0, 32.0, 16.0]      # paper §4.2 + supp Table 9 — radar-centered win
 radar_channels: [64, 128, 512]
 attn_heads: 4
 pretrained_image_encoder: true
+# Depth output parametrization (paper §3 + Supp §8.2 = 'metric' default).
+#   metric  : d  = max_depth × sigmoid(head)             (paper-faithful)
+#   inverse : 1/d = inv_min + sigmoid(head) × (inv_max - inv_min); model
+#             returns metric d via reciprocal so downstream losses stay in
+#             metric space. Better long-range gradients (no sigmoid
+#             saturation at far distances).
+output_mode: metric
+min_depth_clip: 0.5             # only used by output_mode=inverse

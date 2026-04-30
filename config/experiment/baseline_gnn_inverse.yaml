@@ -1,0 +1,18 @@
+# @package _global_
+# Inverse-depth output (Option B): decoder produces 1/d, returns metric d.
+# Loss stays in metric space (paper Eq. 5) so far-range gradients survive
+# while the network's effective output representation is in inverse space —
+# helping long-range prediction by avoiding sigmoid saturation.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+model:
+  output_mode: inverse
+  min_depth_clip: 0.5
+
+wandb:
+  name: baseline_gnn_inverse
+  tags: [baseline, gnn, single-stage, inverse-depth]

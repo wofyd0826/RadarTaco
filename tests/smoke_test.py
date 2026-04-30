@@ -46,8 +46,8 @@ def _fake_batch(B: int, H: int, W: int, K: int, n_sim: int = 0):
     }
 
 
-def _smoke_for_encoder(name: str):
-    print(f"--- encoder: {name} ---")
+def _smoke_for_encoder(name: str, output_mode: str = "metric"):
+    print(f"--- encoder: {name}  output_mode: {output_mode} ---")
     model = RadarTaco(
         radar_encoder_name=name,
         max_depth=100.0,
@@ -55,6 +55,8 @@ def _smoke_for_encoder(name: str):
         radar_channels=(32, 64, 128),     # reduced for CPU smoke speed
         attn_heads=4,
         pretrained_image_encoder=False,
+        output_mode=output_mode,
+        min_depth_clip=0.5,
     )
     n_p = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"  params: {n_p:.2f}M")
@@ -93,8 +95,9 @@ def _smoke_for_encoder(name: str):
 def main():
     torch.manual_seed(0)
     np.random.seed(0)
-    _smoke_for_encoder("gnn")
-    _smoke_for_encoder("mlp")
+    _smoke_for_encoder("gnn", output_mode="metric")
+    _smoke_for_encoder("mlp", output_mode="metric")
+    _smoke_for_encoder("gnn", output_mode="inverse")
     print("\nALL SMOKE TESTS PASSED")
 
 

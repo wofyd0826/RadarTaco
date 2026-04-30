@@ -7,3 +7,5 @@ a_l: [48.0, 32.0, 16.0]
 radar_channels: [64, 128, 512]
 attn_heads: 4
 pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5

@@ -92,6 +92,8 @@ def main(cfg: DictConfig) -> None:
         attn_heads=int(cfg.model.attn_heads),
         mlp_hidden=int(cfg.model.get("mlp_hidden", 128)),
         pretrained_image_encoder=False,
+        output_mode=str(cfg.model.get("output_mode", "metric")),
+        min_depth_clip=float(cfg.model.get("min_depth_clip", 0.5)),
     ).to(device).eval()
     ckpt = torch.load(cfg.checkpoint, map_location=device)
     model.load_state_dict(ckpt["model"], strict=True)
