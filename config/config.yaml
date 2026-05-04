@@ -18,10 +18,12 @@ wandb:
   notes: null
 
 hydra:
+  # Hydra's per-run scratch (cfg snapshot, .hydra/, logs) is segregated
+  # under output/_hydra/ so the experiment dirs stay clean.
   run:
-    dir: ${training.output_dir}/${now:%Y-%m-%d_%H-%M-%S}
+    dir: output/_hydra/${now:%Y-%m-%d_%H-%M-%S}
   sweep:
-    dir: ${training.output_dir}/multirun/${now:%Y-%m-%d_%H-%M-%S}
+    dir: output/_hydra/multirun/${now:%Y-%m-%d_%H-%M-%S}
     subdir: ${hydra.job.num}
   job:
     chdir: false
