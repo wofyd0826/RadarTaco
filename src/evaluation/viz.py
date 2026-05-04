@@ -10,13 +10,28 @@ def colorize_depth(
     vmin: float = 0.0,
     vmax: float = 80.0,
     cmap: str = "viridis",
+    point_radius: int = 0,
 ) -> np.ndarray:
-    """Map a [H, W] depth map to a [H, W, 3] uint8 RGB image via matplotlib cmap."""
+    """Map a [H, W] depth map to a [H, W, 3] uint8 RGB image via matplotlib cmap.
+
+    `point_radius > 0` dilates sparse valid pixels into disks of that radius
+    (useful for sparse LiDAR GT — without it each valid pixel is one px wide
+    and the panel looks black at 900×1600).
+    """
     import matplotlib.cm as cm
-    d = np.clip((depth - vmin) / max(vmax - vmin, 1e-8), 0.0, 1.0)
-    rgb = (cm.get_cmap(cmap)(d)[..., :3] * 255).astype(np.uint8)
-    if valid_mask is not None:
-        rgb[~valid_mask] = 0
+    d = depth.astype(np.float32, copy=False)
+    m = valid_mask
+    if point_radius > 0 and valid_mask is not None:
+        import cv2  # type: ignore
+        k = 2 * point_radius + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        # dilate depth via grayscale max-dilation, restricted to where valid.
+        d = cv2.dilate(np.where(valid_mask, d, 0.0).astype(np.float32), kernel)
+        m = cv2.dilate(valid_mask.astype(np.uint8), kernel).astype(bool)
+    d_norm = np.clip((d - vmin) / max(vmax - vmin, 1e-8), 0.0, 1.0)
+    rgb = (cm.get_cmap(cmap)(d_norm)[..., :3] * 255).astype(np.uint8)
+    if m is not None:
+        rgb[~m] = 0
     return rgb
 
 
@@ -26,11 +41,13 @@ def colorize_error(
     valid_mask: np.ndarray,
     vmax: float = 10.0,
     cmap: str = "inferno",
+    point_radius: int = 0,
 ) -> np.ndarray:
     """|pred − gt| → uint8 RGB error map clipped at vmax meters."""
     err = np.abs(pred - gt)
     err = np.where(valid_mask, err, 0.0)
-    return colorize_depth(err, valid_mask, vmin=0.0, vmax=vmax, cmap=cmap)
+    return colorize_depth(err, valid_mask, vmin=0.0, vmax=vmax, cmap=cmap,
+                          point_radius=point_radius)
 
 
 def overlay_radar_points(

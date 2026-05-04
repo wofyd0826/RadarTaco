@@ -160,8 +160,8 @@ class RadarTacoTrainer:
                 rgb,
                 overlay_radar_points(rgb, radar_pts, radar_mask, vmax=self.cfg.dataset.max_depth),
                 colorize_depth(pn, vmax=self.cfg.dataset.max_depth),
-                colorize_error(pn, gt, valid, vmax=10.0),
-                colorize_depth(gt, valid_mask=valid, vmax=self.cfg.dataset.max_depth),
+                colorize_error(pn, gt, valid, vmax=10.0, point_radius=3),
+                colorize_depth(gt, valid_mask=valid, vmax=self.cfg.dataset.max_depth, point_radius=3),
             ])
             out[f"viz/sample_{i}"] = panel
         return out

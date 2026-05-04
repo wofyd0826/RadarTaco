@@ -139,8 +139,8 @@ def main(cfg: DictConfig) -> None:
                 rgb,
                 overlay_radar_points(rgb, radar_pts, rmask, vmax=cfg.dataset.max_depth),
                 colorize_depth(pn, vmax=cfg.dataset.max_depth),
-                colorize_error(pn, gn, mn, vmax=10.0),
-                colorize_depth(gn, valid_mask=mn, vmax=cfg.dataset.max_depth),
+                colorize_error(pn, gn, mn, vmax=10.0, point_radius=3),
+                colorize_depth(gn, valid_mask=mn, vmax=cfg.dataset.max_depth, point_radius=3),
             ])
             Image.fromarray(panel).save(os.path.join(viz_dir, f"{i:06d}.png"))
 
