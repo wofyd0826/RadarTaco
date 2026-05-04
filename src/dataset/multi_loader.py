@@ -56,11 +56,14 @@ class MultiDatasetLoader:
         )
 
     def _compute_steps_per_epoch(self) -> int:
-        primary_len = len(self.loaders[self.primary_idx])
         primary_prob = self.probs[self.primary_idx]
         if primary_prob <= 0:
-            # Pathological: primary never picked. Fall back to summed length.
-            return sum(len(l) for l in self.loaders)
+            # Configured primary never picked (e.g. ratio_real=0 for a
+            # sim-only ablation). Re-anchor to whichever loader has the
+            # highest probability so epoch length tracks that source.
+            self.primary_idx = max(range(len(self.probs)), key=lambda i: self.probs[i])
+            primary_prob = self.probs[self.primary_idx]
+        primary_len = len(self.loaders[self.primary_idx])
         # Total step count so the primary is fully consumed in expectation.
         return int(round(primary_len / primary_prob))
 
