@@ -39,6 +39,15 @@ sim:
   num_radar_points_min: 30
   num_radar_points_max: 60
   depth_noise_std: 0.5
+  # Real-radar noise injection (A1). Disabled here; experiments enable it
+  # to make sim radar look closer to nuScenes' noisy mmWave returns.
+  real_noise:
+    enabled: false
+    dropout_prob:       0.30   # frac. of true returns dropped (false-negative)
+    lateral_jitter_px:  8.0    # σ on x_pix (≈ ±1° azimuth at fx≈725)
+    depth_outlier_prob: 0.10   # extra long-tail depth outliers
+    depth_outlier_std:  3.0    # σ (m) of those outliers
+    clutter_frac:       0.10   # frac. replaced w/ random ground/road clutter
   train_resize_hw: null              # null = use each sim source's native res
                                      # Hypersim 768×1024, vKITTI2 375×1242
   hypersim:

@@ -45,6 +45,10 @@ class SimRadarDepthDataset(BaseRadarDepthDataset):
         num_radar_points: Tuple[int, int] = (30, 60),
         depth_noise_std: float = 0.5,
         class_weights: Optional[Dict[str, float]] = None,    # vkitti2 semantic
+        # Real-radar noise injection (A1): make sim radar look more like noisy
+        # nuScenes radar by adding dropout / lateral jitter / depth outliers /
+        # clutter false-positives. Disabled by default; enable from the cfg.
+        real_noise: Optional[Dict] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -54,6 +58,13 @@ class SimRadarDepthDataset(BaseRadarDepthDataset):
         self.num_radar_points = num_radar_points
         self.depth_noise_std = depth_noise_std
         self.class_weights = dict(class_weights) if class_weights else None
+        rn = dict(real_noise) if real_noise else {}
+        self.rn_enabled = bool(rn.get("enabled", False))
+        self.rn_dropout_prob = float(rn.get("dropout_prob", 0.0))
+        self.rn_lateral_jitter_px = float(rn.get("lateral_jitter_px", 0.0))
+        self.rn_depth_outlier_prob = float(rn.get("depth_outlier_prob", 0.0))
+        self.rn_depth_outlier_std = float(rn.get("depth_outlier_std", 5.0))
+        self.rn_clutter_frac = float(rn.get("clutter_frac", 0.0))
         self._semantic_fallback_warned = False
         if dataset_type == "hypersim":
             self.depth_scale = 1000.0
@@ -248,6 +259,14 @@ class SimRadarDepthDataset(BaseRadarDepthDataset):
             sd = np.maximum(sd + np.random.normal(0, self.depth_noise_std, n).astype(np.float32),
                             self.min_depth)
         pts3 = np.stack([sx, sy, sd], axis=-1)                  # (N, 3) image-projected
+        # Inject nuScenes-like radar noise (A1): drop / jitter / outlier /
+        # clutter — only if rn_enabled. Operates on (x_pix, y_pix, depth)
+        # before ego-coord expansion so the perturbed pixel/depth round-trip
+        # back to consistent (front, left, up).
+        if self.rn_enabled:
+            pts3 = self._inject_real_noise(pts3, H, W)
+            if pts3.shape[0] == 0:
+                return np.zeros((0, 6), dtype=np.float32)
         # Rescale intrinsics from the dataset's reference resolution to the
         # current sampling resolution.
         sx_scale = W / float(self._intrinsic_template["W_orig"])
@@ -259,3 +278,57 @@ class SimRadarDepthDataset(BaseRadarDepthDataset):
             "cy": self._intrinsic_template["cy"] * sy_scale,
         }
         return expand_to_6ch(pts3, intr)
+
+    def _inject_real_noise(self, pts3: np.ndarray, H: int, W: int) -> np.ndarray:
+        """Add nuScenes-style imperfections to clean sim radar.
+
+        pts3: (N, 3) = (x_pix, y_pix, depth). Returns possibly-shorter (M, 3).
+
+        Knobs (all from cfg.dataset.sim.real_noise):
+          dropout_prob       — fraction of points dropped (false negative)
+          lateral_jitter_px  — Gaussian σ on x_pix (azimuth angular noise proxy)
+          depth_outlier_prob — fraction of points perturbed by an extra
+                                Gaussian shift (real radar's range outliers)
+          depth_outlier_std  — σ of that extra shift, in metres
+          clutter_frac       — fraction of points overwritten by random
+                                pixels in the lower image (road clutter,
+                                ground multi-path)
+        """
+        if pts3.shape[0] == 0:
+            return pts3
+        N = pts3.shape[0]
+        # 1) random dropout of true returns
+        if self.rn_dropout_prob > 0:
+            keep = np.random.rand(N) > self.rn_dropout_prob
+            pts3 = pts3[keep]
+            if pts3.shape[0] == 0:
+                return pts3
+            N = pts3.shape[0]
+        px = pts3[:, 0].copy()
+        py = pts3[:, 1].copy()
+        pd = pts3[:, 2].copy()
+        # 2) lateral jitter on x_pix (azimuth angular noise)
+        if self.rn_lateral_jitter_px > 0:
+            px = px + np.random.normal(0.0, self.rn_lateral_jitter_px, N).astype(np.float32)
+            px = np.clip(px, 0.0, W - 1)
+        # 3) depth outliers (long-tail noise on top of base Gaussian)
+        if self.rn_depth_outlier_prob > 0 and self.rn_depth_outlier_std > 0:
+            out_mask = np.random.rand(N) < self.rn_depth_outlier_prob
+            if out_mask.any():
+                shift = np.random.normal(0.0, self.rn_depth_outlier_std,
+                                          int(out_mask.sum())).astype(np.float32)
+                pd[out_mask] = pd[out_mask] + shift
+        # 4) clutter: rewrite some entries with random ground/road points.
+        # Ground clutter in real radar lands on the lower half of the image
+        # at short-to-mid range; mimic that.
+        if self.rn_clutter_frac > 0:
+            n_cl = int(round(self.rn_clutter_frac * N))
+            if n_cl > 0:
+                idx = np.random.choice(N, n_cl, replace=False)
+                px[idx] = np.random.uniform(0.0, W, n_cl).astype(np.float32)
+                py[idx] = np.random.uniform(0.5 * H, H, n_cl).astype(np.float32)
+                pd[idx] = np.random.uniform(2.0, min(40.0, self.max_depth_dataset),
+                                            n_cl).astype(np.float32)
+        # Final clip to valid depth range
+        pd = np.clip(pd, self.min_depth, self.max_depth_dataset).astype(np.float32)
+        return np.stack([px.astype(np.float32), py.astype(np.float32), pd], axis=-1)

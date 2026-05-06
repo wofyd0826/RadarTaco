@@ -79,6 +79,9 @@ def _build_sim_loaders(cfg):
                           int(sim_cfg.num_radar_points_max)),
         depth_noise_std=float(sim_cfg.depth_noise_std),
     )
+    real_noise = sim_cfg.get("real_noise", None)
+    if real_noise is not None:
+        base_sim_kw["real_noise"] = OmegaConf.to_container(real_noise, resolve=True)
     resize = tuple(sim_cfg.train_resize_hw) if sim_cfg.get("train_resize_hw") else None
     out = []
     for name in ("hypersim", "vkitti2"):
