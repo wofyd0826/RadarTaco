@@ -83,7 +83,7 @@ else
 fi
 
 # locate stage-1 best.pt (could be under a re-run suffix like sim_pretrain1/)
-PRETRAIN_CKPT=$(ls -dt "$PRETRAIN_DIR"*/best.pt 2>/dev/null | head -1)
+PRETRAIN_CKPT=$(ls -dt "$PRETRAIN_DIR"/best.pt "$PRETRAIN_DIR"[0-9]*/best.pt 2>/dev/null | head -1)
 if [ -z "$PRETRAIN_CKPT" ]; then
   echo "[$PRETRAIN_NAME] no best.pt under ${PRETRAIN_DIR}* — abort" | tee -a "$LOG"
   exit 2
@@ -119,7 +119,7 @@ fi
 
 # ───────────────────────────────────────────────────── STAGE 3: eval test ──
 FT_DIR="$OUTPUT_ROOT/$FINETUNE_NAME"
-FT_CKPT=$(ls -dt "$FT_DIR"*/best.pt 2>/dev/null | head -1)
+FT_CKPT=$(ls -dt "$FT_DIR"/best.pt "$FT_DIR"[0-9]*/best.pt 2>/dev/null | head -1)
 if [ -z "$FT_CKPT" ]; then
   echo "[$FINETUNE_NAME] no best.pt under ${FT_DIR}* — skipping eval" | tee -a "$LOG"
   exit 0

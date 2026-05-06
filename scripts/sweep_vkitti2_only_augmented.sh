@@ -115,7 +115,7 @@ for entry in "${EXPERIMENTS[@]}"; do
   fi
 
   # ───── locate best.pt ─────
-  CKPT=$(ls -dt "$EXP_DIR"*/best.pt 2>/dev/null | head -1)
+  CKPT=$(ls -dt "$EXP_DIR"/best.pt "$EXP_DIR"[0-9]*/best.pt 2>/dev/null | head -1)
   if [ -z "$CKPT" ]; then
     echo "[$NAME] no best.pt under ${EXP_DIR}* — skipping eval" | tee -a "$LOG"
     SUMMARY+=("$NAME | NO CHECKPOINT")
