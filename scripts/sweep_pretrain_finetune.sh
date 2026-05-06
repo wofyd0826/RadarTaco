@@ -60,7 +60,7 @@ PRETRAIN_DIR="$OUTPUT_ROOT/$PRETRAIN_NAME"
 PRETRAIN_CKPT="$PRETRAIN_DIR/best.pt"
 
 if [ "$SKIP_PRETRAIN" -ne 1 ]; then
-  PRE_ARGS="+experiment=sim_pretrain_finetune training=sim_pretrain dataset=mixed dataset.sim.ratio_real=0.0 dataset.sim.ratio_sim=1.0"
+  PRE_ARGS="+experiment=sim_pretrain_finetune training=sim_pretrain dataset=mixed dataset.sim.ratio_real=0.0 dataset.sim.ratio_sim=1.0 dataset.sim.hypersim.enabled=false"
   [ -n "$PRETRAIN_EPOCHS" ] && PRE_ARGS+=" training.epochs=$PRETRAIN_EPOCHS"
   {
     echo ""
