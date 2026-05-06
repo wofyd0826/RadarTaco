@@ -113,12 +113,79 @@ def _build_sim_loaders(cfg):
     return out
 
 
+def _build_sim_val_loader(cfg) -> Optional[DataLoader]:
+    """Build a val loader from the first enabled sim source (vKITTI2/Hypersim).
+
+    Used when `cfg.training.stage == 'sim_pretrain'` so the pretrain stage
+    selects best.pt by sim-domain val performance — i.e. "is the model
+    learning a good sim representation" — instead of conflating pretrain
+    quality with direct sim→real transfer (which is what the finetune
+    stage is for).
+    """
+    ds_cfg = cfg.dataset
+    sim_cfg = ds_cfg.get("sim", None)
+    if sim_cfg is None:
+        return None
+    common = _common_dataset_kwargs(ds_cfg)
+    for name in ("vkitti2", "hypersim"):              # vKITTI2 first (closer to nuScenes scenes)
+        sub = sim_cfg.get(name, None)
+        if sub is None or not sub.get("enabled", False):
+            continue
+        if not os.path.isdir(sub.data_root):
+            continue
+        split_val = sub.get("split_val", None)
+        if not split_val:
+            logger.warning(f"{name}: no split_val configured — skipping for sim val")
+            continue
+        sim_mode = sub.get("radar_simulation", None) or sim_cfg.radar_simulation
+        cls_w = sub.get("class_weights", None)
+        cls_w = dict(cls_w) if cls_w else None
+        ds = SimRadarDepthDataset(
+            data_root=sub.data_root,
+            split_file=split_val,
+            dataset_type=sub.dataset_type,
+            radar_simulation=sim_mode,
+            class_weights=cls_w,
+            num_radar_points=(int(sim_cfg.num_radar_points_min),
+                              int(sim_cfg.num_radar_points_max)),
+            depth_noise_std=float(sim_cfg.depth_noise_std),
+            resize_to_hw=None, augmentation=False,
+            **common,
+        )
+        n_val = cfg.training.get("val_subset_size", 500)
+        if n_val and n_val < len(ds):
+            gen = torch.Generator().manual_seed(int(cfg.training.seed))
+            idx = torch.randperm(len(ds), generator=gen)[:int(n_val)].tolist()
+            ds = Subset(ds, idx)
+        logger.info(f"sim val loader: {name} (n={len(ds)})")
+        return DataLoader(ds, batch_size=1, shuffle=False,
+                          num_workers=int(ds_cfg.num_workers), pin_memory=True)
+    logger.warning("sim_pretrain stage requested but no enabled sim val source — falling back to nuScenes val")
+    return None
+
+
 def build_loaders(cfg) -> Tuple[object, DataLoader]:
-    """Build (train_loader, val_loader). train_loader may be a MultiDatasetLoader."""
-    nusc_train, val_loader = _build_nuscenes_loaders(cfg)
+    """Build (train_loader, val_loader). train_loader may be a MultiDatasetLoader.
+
+    Validation source is normally nuScenes, except when
+    `cfg.training.stage == 'sim_pretrain'` — in which case the val set is
+    drawn from the first enabled sim source so best.pt selection tracks
+    sim-domain learning quality, matching the standard pretrain →
+    finetune split (pretrain best on pretrain domain, finetune best on
+    downstream domain).
+    """
+    nusc_train, nusc_val_loader = _build_nuscenes_loaders(cfg)
     sim_loaders = _build_sim_loaders(cfg)
     sim_cfg = cfg.dataset.get("sim", None)
     use_sim = bool(sim_cfg and sim_cfg.get("enabled", False) and len(sim_loaders) > 0)
+
+    stage = str(cfg.training.get("stage", "single"))
+    if stage == "sim_pretrain":
+        sim_val_loader = _build_sim_val_loader(cfg)
+        val_loader = sim_val_loader if sim_val_loader is not None else nusc_val_loader
+    else:
+        val_loader = nusc_val_loader
+
     if not use_sim:
         return nusc_train, val_loader
     ratio_real = float(sim_cfg.ratio_real)

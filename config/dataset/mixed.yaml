@@ -54,11 +54,13 @@ sim:
     enabled: true
     data_root: /data/public/Hypersim/train
     split_train: /workspace/Marigold/data_split/hypersim_depth/filename_list_train_filtered.txt
+    split_val:   /workspace/Marigold/data_split/hypersim_depth/filename_list_val_filtered.txt
     dataset_type: hypersim
   vkitti2:
     enabled: true
     data_root: /data/public/vkitti2
     split_train: /workspace/Marigold/data_split/vkitti_depth/vkitti_train.txt
+    split_val:   /workspace/Marigold/data_split/vkitti_depth/vkitti_val.txt
     dataset_type: vkitti2
     # Per-source override (otherwise inherit sim.radar_simulation).
     # Set to "semantic_aware" to use classSegmentation-weighted sampling.
