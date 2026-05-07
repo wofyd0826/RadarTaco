@@ -1,0 +1,9 @@
+# RGB-only depth U-Net (paper Table 5 row 1: "RGB Baseline" by Singh et al.).
+# Uses the same ImageEncoder + DepthDecoder as RadarTaco; no radar encoder,
+# no fusion. For controlled comparison against the radar pipeline.
+name: rgb_only
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]

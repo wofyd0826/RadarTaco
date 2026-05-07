@@ -37,6 +37,60 @@ from src.evaluation.metrics import DepthEvaluator                            # n
 from src.evaluation.viz import (build_grid, colorize_depth, colorize_error,  # noqa: E402
                                 overlay_radar_points, rgb_to_uint8)
 from src.model.radartaco import RadarTaco                                    # noqa: E402
+from src.model.rgb_only import RGBOnlyDepth                                  # noqa: E402
+
+
+def _maybe_override_model_from_ckpt(cfg) -> None:
+    """If the checkpoint sits next to a saved `config.yaml`, override
+    `cfg.model` with the one used to train the checkpoint. Prevents the
+    common "wrong model class on strict load" failure when `model=...`
+    isn't passed on the eval command line."""
+    sibling = os.path.join(os.path.dirname(cfg.checkpoint), "config.yaml")
+    if not os.path.exists(sibling):
+        return
+    saved = OmegaConf.load(sibling)
+    saved_model = saved.get("model", None)
+    if saved_model is None:
+        return
+    cur_name = str(cfg.model.get("name", "radartaco")).lower()
+    saved_name = str(saved_model.get("name", "radartaco")).lower()
+    if cur_name == saved_name:
+        return
+    logger.info(f"auto-overriding cfg.model from {sibling}: "
+                f"{cur_name} -> {saved_name}")
+    OmegaConf.set_struct(cfg, False)
+    cfg.model = saved_model
+    OmegaConf.set_struct(cfg, True)
+
+
+def _build_eval_model(cfg, device):
+    name = str(cfg.model.get("name", "radartaco")).lower()
+    if name == "rgb_only":
+        m = RGBOnlyDepth(
+            max_depth=float(cfg.dataset.max_depth),
+            pretrained_image_encoder=False,
+            output_mode=str(cfg.model.get("output_mode", "metric")),
+            min_depth_clip=float(cfg.model.get("min_depth_clip", 0.5)),
+            multi_scale=bool(cfg.model.get("multi_scale", False)),
+            multi_scale_levels=tuple(cfg.model.get("multi_scale_levels", (2, 4, 8, 16))),
+        )
+    else:
+        m = RadarTaco(
+            radar_encoder_name=cfg.model.radar_encoder,
+            max_depth=float(cfg.dataset.max_depth),
+            max_radar_points=int(cfg.dataset.max_radar_points),
+            k_neighbors=int(cfg.model.k_neighbors),
+            a_l=tuple(cfg.model.a_l),
+            radar_channels=tuple(cfg.model.radar_channels),
+            attn_heads=int(cfg.model.attn_heads),
+            mlp_hidden=int(cfg.model.get("mlp_hidden", 128)),
+            pretrained_image_encoder=False,
+            output_mode=str(cfg.model.get("output_mode", "metric")),
+            min_depth_clip=float(cfg.model.get("min_depth_clip", 0.5)),
+            multi_scale=bool(cfg.model.get("multi_scale", False)),
+            multi_scale_levels=tuple(cfg.model.get("multi_scale_levels", (2, 4, 8, 16))),
+        )
+    return m.to(device).eval()
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
                     level=logging.INFO)
@@ -47,6 +101,7 @@ logger = logging.getLogger("radartaco.eval")
 def main(cfg: DictConfig) -> None:
     if not cfg.get("checkpoint"):
         raise SystemExit("checkpoint=<path/to/.pt> is required (Hydra override).")
+    _maybe_override_model_from_ckpt(cfg)
     out_dir = cfg.get("eval_out_dir", os.path.join(os.path.dirname(cfg.checkpoint), "eval"))
     os.makedirs(out_dir, exist_ok=True)
     viz_dir = os.path.join(out_dir, "viz")
@@ -82,21 +137,7 @@ def main(cfg: DictConfig) -> None:
                         num_workers=int(cfg.dataset.num_workers), pin_memory=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = RadarTaco(
-        radar_encoder_name=cfg.model.radar_encoder,
-        max_depth=float(cfg.dataset.max_depth),
-        max_radar_points=int(cfg.dataset.max_radar_points),
-        k_neighbors=int(cfg.model.k_neighbors),
-        a_l=tuple(cfg.model.a_l),
-        radar_channels=tuple(cfg.model.radar_channels),
-        attn_heads=int(cfg.model.attn_heads),
-        mlp_hidden=int(cfg.model.get("mlp_hidden", 128)),
-        pretrained_image_encoder=False,
-        output_mode=str(cfg.model.get("output_mode", "metric")),
-        min_depth_clip=float(cfg.model.get("min_depth_clip", 0.5)),
-        multi_scale=bool(cfg.model.get("multi_scale", False)),
-        multi_scale_levels=tuple(cfg.model.get("multi_scale_levels", (2, 4, 8, 16))),
-    ).to(device).eval()
+    model = _build_eval_model(cfg, device)
     ckpt = torch.load(cfg.checkpoint, map_location=device)
     model.load_state_dict(ckpt["model"], strict=True)
     logger.info(f"loaded {cfg.checkpoint} (epoch={ckpt.get('epoch', '?')})")

@@ -26,7 +26,9 @@ cd "$ROOT"
 
 PRETRAIN_EPOCHS="${PRETRAIN_EPOCHS:-}"
 FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-}"
-BATCH_SIZE="${BATCH_SIZE:-32}"
+# Per-stage batch_size — see sweep_pretrain_finetune.sh for full reasoning.
+PRETRAIN_BATCH_SIZE="${PRETRAIN_BATCH_SIZE:-${BATCH_SIZE:-32}}"
+FINETUNE_BATCH_SIZE="${FINETUNE_BATCH_SIZE:-${BATCH_SIZE:-12}}"
 SKIP_PRETRAIN="${SKIP_PRETRAIN:-0}"
 SKIP_FINETUNE="${SKIP_FINETUNE:-0}"
 WANDB="${WANDB:-true}"
@@ -39,7 +41,6 @@ LOG="$OUTPUT_ROOT/_sweep_log_${FINETUNE_NAME}_${SWEEP_TAG}.log"
 
 EXTRA=""
 [ "$WANDB" = "false" ] && EXTRA+=" wandb.enabled=false"
-[ -n "$BATCH_SIZE" ] && EXTRA+=" training.batch_size=$BATCH_SIZE"
 
 {
   echo "════════════════════════════════════════════════════════════════"
@@ -47,7 +48,7 @@ EXTRA=""
   echo "  output_root:      $OUTPUT_ROOT"
   echo "  pretrain epochs:  ${PRETRAIN_EPOCHS:-<config default 30>}"
   echo "  finetune epochs:  ${FINETUNE_EPOCHS:-<config default 50>}"
-  echo "  batch_size:       ${BATCH_SIZE:-<config default>}"
+  echo "  batch_size:       pretrain=$PRETRAIN_BATCH_SIZE  finetune=$FINETUNE_BATCH_SIZE"
   echo "  skip_pretrain:    $SKIP_PRETRAIN"
   echo "  skip_finetune:    $SKIP_FINETUNE"
   echo "  wandb:            $WANDB"
@@ -60,7 +61,7 @@ PRETRAIN_DIR="$OUTPUT_ROOT/$PRETRAIN_NAME"
 PRETRAIN_CKPT="$PRETRAIN_DIR/best.pt"
 
 if [ "$SKIP_PRETRAIN" -ne 1 ]; then
-  PRE_ARGS="+experiment=sim_pretrain_finetune training=sim_pretrain dataset=mixed dataset.sim.ratio_real=0.0 dataset.sim.ratio_sim=1.0 dataset.sim.hypersim.enabled=false dataset.sim.real_noise.enabled=true"
+  PRE_ARGS="+experiment=sim_pretrain_finetune training=sim_pretrain dataset=mixed dataset.sim.ratio_real=0.0 dataset.sim.ratio_sim=1.0 dataset.sim.hypersim.enabled=false dataset.sim.real_noise.enabled=true training.batch_size=$PRETRAIN_BATCH_SIZE"
   [ -n "$PRETRAIN_EPOCHS" ] && PRE_ARGS+=" training.epochs=$PRETRAIN_EPOCHS"
   {
     echo ""
@@ -96,7 +97,7 @@ if [ "$SKIP_FINETUNE" -eq 1 ]; then
 fi
 
 # ───────────────────────────────────────────────────── STAGE 2: finetune ──
-FT_ARGS="+experiment=sim_pretrain_finetune training=nuscenes_finetune"
+FT_ARGS="+experiment=sim_pretrain_finetune training=nuscenes_finetune training.batch_size=$FINETUNE_BATCH_SIZE"
 [ -n "$FINETUNE_EPOCHS" ] && FT_ARGS+=" training.epochs=$FINETUNE_EPOCHS"
 {
   echo ""

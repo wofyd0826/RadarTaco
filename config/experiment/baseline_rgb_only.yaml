@@ -1,0 +1,17 @@
+# @package _global_
+# RGB-only baseline (no radar) — same image encoder + decoder + dataset +
+# loss + training schedule as baseline_gnn, just no radar branch. Use this
+# as a controlled comparison to paper Table 5 row 1 (RGB Baseline = 2474.3
+# mm MAE @ 0-70m). If our pipeline gives a similarly proportional number,
+# the "1.2 m vs paper 1.83 m" gap on the full model is an evaluation
+# environment effect; if our RGB-only is close to 2.4 m, the gap is a real
+# architectural / training improvement.
+defaults:
+  - override /model: rgb_only
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+wandb:
+  name: baseline_rgb_only
+  tags: [baseline, rgb_only]
