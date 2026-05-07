@@ -98,6 +98,24 @@ class SimRadarDepthDataset(BaseRadarDepthDataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict:
+        # When `augmentation=False` (val/test), seed numpy RNG deterministically
+        # by sample idx so that sim radar generation (np.random.choice etc.) is
+        # reproducible across epochs. Otherwise val MAE oscillates because the
+        # same image is fed different radar points each epoch — purely a
+        # measurement-noise floor, not actual model variance. Train mode keeps
+        # the original non-deterministic behaviour so radar randomness still
+        # acts as augmentation.
+        rng_state = None
+        if not self.augmentation:
+            rng_state = np.random.get_state()
+            np.random.seed(0xC0FFEE + int(idx))
+        try:
+            return self._build_sample(idx)
+        finally:
+            if rng_state is not None:
+                np.random.set_state(rng_state)
+
+    def _build_sample(self, idx: int) -> Dict:
         s = self.samples[idx]
         rgb_path = os.path.join(self.data_root, s["rgb"])
         rgb = np.asarray(Image.open(rgb_path).convert("RGB"))
