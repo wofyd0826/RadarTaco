@@ -1,0 +1,23 @@
+# @package _global_
+# RadarTaco plug-in branch experiment on nuScenes only (paper §3.3 + §3.4).
+# Same dataset / loss / schedule as baseline_gnn; only difference is:
+#   - model.use_aux_branch = true
+#   - dataset.rel_depth_dir = "relative_depth"  (precompute with scripts/precompute_relative_depth.py)
+#   - dataset.rel_depth_dropout_prob = 0.5  (50/50 plug-in vs independent training)
+#
+# The trained model can be evaluated in either mode via the eval scripts:
+#   scripts/eval.py        +checkpoint=...  eval_mode=independent
+#   scripts/eval.py        +checkpoint=...  eval_mode=plugin
+defaults:
+  - override /model: radartaco_gnn_plugin
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  rel_depth_dir: relative_depth         # subdir under data_root with `D*` PNGs
+  rel_depth_dropout_prob: 0.5            # paper §3.4 "two equal portions"
+
+wandb:
+  name: baseline_gnn_plugin
+  tags: [baseline, gnn, plugin]

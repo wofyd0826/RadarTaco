@@ -138,6 +138,12 @@ class SimRadarDepthDataset(BaseRadarDepthDataset):
             "depth_gt_dense": depth_gt.clone(),
             "valid_mask_lidar": valid_mask,
             "valid_mask_dense": valid_mask.clone(),
+            # Sim has no monocular depth predictor output — emit zeros for
+            # the plug-in branch so the unified dict shape is consistent
+            # across sources. With `rel_depth_dropout_prob=0.5` in mixed
+            # training, this just means sim samples always contribute the
+            # independent-mode signal.
+            "rel_depth": torch.zeros_like(depth_gt),
             "is_night": torch.tensor(False, dtype=torch.bool),
             "is_sim": torch.tensor(True, dtype=torch.bool),
             "sample_id": f"{self.dataset_type}/{idx}",

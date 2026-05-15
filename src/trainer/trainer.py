@@ -27,6 +27,7 @@ class RadarTacoTrainer:
         wandb_logger=None,
         device: str = "cuda",
         viz_sampler: Optional[List[Dict]] = None,
+        val_loaders_extra: Optional[Dict[str, DataLoader]] = None,
     ) -> None:
         self.cfg = cfg
         self.device = device
@@ -35,6 +36,10 @@ class RadarTacoTrainer:
         self.evaluator = evaluator
         self.train_loader = train_loader
         self.val_loader = val_loader
+        # Extra val loaders are evaluated each epoch for logging only —
+        # best.pt selection always uses the primary `val_loader` (typically
+        # nuScenes) to keep the metric target stable across experiments.
+        self.val_loaders_extra: Dict[str, DataLoader] = dict(val_loaders_extra or {})
         self.wandb = wandb_logger
         self.viz_sampler = viz_sampler
 
@@ -68,9 +73,15 @@ class RadarTacoTrainer:
             self._adjust_lr(epoch)
             self._train_one_epoch(epoch)
             metrics, agg = self.validate()
+            extras = {}
+            for name, loader in self.val_loaders_extra.items():
+                _, agg_extra = self._validate_on(loader, log_tag=f"VAL[{name}]")
+                extras[name] = agg_extra
             viz = self._build_viz_panel() if (self.wandb is not None and self.viz_sampler) else None
             if self.wandb is not None:
                 self.wandb.log_validation(epoch, agg, images=viz)
+                for name, agg_extra in extras.items():
+                    self.wandb.log_validation(epoch, agg_extra, prefix=f"eval_{name}")
             self._save_checkpoint(metrics, epoch, agg)
 
     def _train_one_epoch(self, epoch: int) -> None:
@@ -83,7 +94,8 @@ class RadarTacoTrainer:
             with autocast(enabled=self.amp):
                 pred = self.model(batch["rgb_norm"],
                                   batch["radar_points"],
-                                  batch["radar_mask"])
+                                  batch["radar_mask"],
+                                  batch.get("rel_depth"))
                 losses = self.loss_fn(pred, batch)
                 loss = losses["loss_total"]
             self.scaler.scale(loss).backward()
@@ -106,15 +118,16 @@ class RadarTacoTrainer:
 
     # ------------------------------------------------------- validation --
     @torch.no_grad()
-    def validate(self):
+    def _validate_on(self, loader: DataLoader, log_tag: str = "VAL"):
         self.model.eval()
         all_metrics = []
-        for batch in self.val_loader:
+        for batch in loader:
             batch = self._to_device(batch)
             with autocast(enabled=self.amp):
                 pred = self.model(batch["rgb_norm"],
                                   batch["radar_points"],
-                                  batch["radar_mask"])
+                                  batch["radar_mask"],
+                                  batch.get("rel_depth"))
             B = pred.shape[0]
             for b in range(B):
                 pn = pred[b, 0].float().cpu().numpy()
@@ -129,12 +142,15 @@ class RadarTacoTrainer:
         far100 = agg.get("far", {}).get("80-100m", {})
         night = agg.get("night", {}).get("0-80m", {})
         logger.info(
-            f"VAL  0-80m MAE={head.get('mae', float('nan')):.1f}/RMSE={head.get('rmse', float('nan')):.1f}  "
+            f"{log_tag}  0-80m MAE={head.get('mae', float('nan')):.1f}/RMSE={head.get('rmse', float('nan')):.1f}  "
             f"|  0-100m MAE={head100.get('mae', float('nan')):.1f}/RMSE={head100.get('rmse', float('nan')):.1f}  "
             f"|  far 50-80m MAE={far.get('mae', float('nan')):.1f}  80-100m MAE={far100.get('mae', float('nan')):.1f}  "
             f"|  night MAE={night.get('mae', float('nan')):.1f}"
         )
         return head, agg
+
+    def validate(self):
+        return self._validate_on(self.val_loader, log_tag="VAL")
 
     @torch.no_grad()
     def _build_viz_panel(self):
@@ -149,7 +165,8 @@ class RadarTacoTrainer:
             batch = {k: (v.unsqueeze(0).to(self.device) if torch.is_tensor(v) else v)
                      for k, v in sample.items()}
             with autocast(enabled=self.amp):
-                pred = self.model(batch["rgb_norm"], batch["radar_points"], batch["radar_mask"])
+                pred = self.model(batch["rgb_norm"], batch["radar_points"], batch["radar_mask"],
+                                  batch.get("rel_depth"))
             rgb = rgb_to_uint8(batch["rgb_norm"][0].cpu().numpy())
             radar_pts = batch["radar_points"][0].cpu().numpy()
             radar_mask = batch["radar_mask"][0].cpu().numpy().astype(bool)

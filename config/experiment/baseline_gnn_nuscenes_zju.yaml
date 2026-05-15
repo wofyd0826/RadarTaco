@@ -1,0 +1,16 @@
+# @package _global_
+# Joint training on nuScenes + ZJU-4DRadarCam (paper §3.4 "training data
+# [4, 22] is randomly divided into two equal portions in each epoch").
+#
+# Same model / loss / schedule as baseline_gnn, only the dataset stream
+# is changed. Validation still runs on nuScenes so best.pt tracks the
+# Table 1 metric.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: mixed_nuscenes_zju
+  - override /training: default
+  - override /loss: default
+
+wandb:
+  name: baseline_gnn_nuscenes_zju
+  tags: [baseline, gnn, single-stage, mixed, zju]

@@ -36,6 +36,7 @@ class NuScenesRadarDepthDataset(BaseRadarDepthDataset):
         dense_gt_dir: str = "depth_acc",
         radar_3d_dir: str = "radar_3d",
         night_ids_file: Optional[str] = None,
+        rel_depth_dir: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -58,6 +59,7 @@ class NuScenesRadarDepthDataset(BaseRadarDepthDataset):
         self.data_root = data_root
         self.dense_gt_dir = dense_gt_dir
         self.radar_3d_dir = radar_3d_dir
+        self.rel_depth_dir = rel_depth_dir
         self.samples = self._load_split(split_file)
         self.night_ids: Set[str] = self._load_night_ids(night_ids_file)
         self._radar3d_missing_warned = False
@@ -153,6 +155,12 @@ class NuScenesRadarDepthDataset(BaseRadarDepthDataset):
             depth_gt_dense = depth_gt_lidar.clone()
             valid_mask_dense = valid_mask_lidar.clone()
 
+        H, W = depth_gt_lidar.shape[-2], depth_gt_lidar.shape[-1]
+        rel_depth_path = None
+        if self.rel_depth_dir is not None:
+            rel_depth_path = os.path.join(self.data_root, self.rel_depth_dir, f"{sub}.png")
+        rel_depth = self._load_rel_depth(rel_depth_path, (H, W))
+
         sample = {
             "rgb_norm": rgb_norm,
             "radar_points": radar_points_t,
@@ -161,6 +169,7 @@ class NuScenesRadarDepthDataset(BaseRadarDepthDataset):
             "depth_gt_dense": depth_gt_dense,
             "valid_mask_lidar": valid_mask_lidar,
             "valid_mask_dense": valid_mask_dense,
+            "rel_depth": rel_depth,
             "is_night": torch.tensor(sample_id in self.night_ids, dtype=torch.bool),
             "is_sim": torch.tensor(False, dtype=torch.bool),
             "sample_id": sample_id,

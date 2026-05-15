@@ -33,6 +33,14 @@ batch_size: 12
 
 sim:
   enabled: true
+  # batch_mix=false (default): MultiDatasetLoader picks ONE source per
+  # step; each batch is fully sim or fully real. ratio_real / ratio_sim
+  # are sampling probabilities.
+  # batch_mix=true: MixedBatchLoader composes EVERY batch from a fixed
+  # quota of each source (e.g. batch=12 with ratio_real=0.5 → 6 nuScenes
+  # + 6 sim per batch). Requires all sources to share H/W; sim sources
+  # are auto-resized to nuScenes resolution when this is on.
+  batch_mix: false
   ratio_real: 0.7              # weight for nuScenes
   ratio_sim: 0.3               # total weight for the union of sim datasets
   radar_simulation: augmented

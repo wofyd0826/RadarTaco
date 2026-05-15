@@ -66,6 +66,7 @@ def _build_model(cfg, max_depth: float, max_radar_points: int):
         min_depth_clip=float(cfg.model.get("min_depth_clip", 0.5)),
         multi_scale=bool(cfg.model.get("multi_scale", False)),
         multi_scale_levels=tuple(cfg.model.get("multi_scale_levels", (2, 4, 8, 16))),
+        use_aux_branch=bool(cfg.model.get("use_aux_branch", False)),
     )
 from src.util.loaders import build_loaders, build_viz_sampler                # noqa: E402
 from src.util.seeds import set_seed                                          # noqa: E402
@@ -99,7 +100,14 @@ def main(cfg: DictConfig) -> None:
     logger.info("config:\n" + OmegaConf.to_yaml(cfg))
 
     set_seed(int(cfg.training.seed))
-    train_loader, val_loader = build_loaders(cfg)
+    loaders = build_loaders(cfg)
+    # build_loaders may return 2- or 3-tuple depending on whether any
+    # extra-domain val loaders (e.g. ZJU) are configured.
+    if len(loaders) == 3:
+        train_loader, val_loader, val_loaders_extra = loaders
+    else:
+        train_loader, val_loader = loaders
+        val_loaders_extra = {}
 
     model = _build_model(cfg,
                          max_depth=float(cfg.dataset.max_depth),
@@ -118,7 +126,8 @@ def main(cfg: DictConfig) -> None:
     trainer = RadarTacoTrainer(cfg, model, loss_fn, evaluator,
                                train_loader, val_loader,
                                wandb_logger=wandb_logger,
-                               viz_sampler=viz_sampler)
+                               viz_sampler=viz_sampler,
+                               val_loaders_extra=val_loaders_extra)
     if cfg.training.get("load_weights_from"):
         trainer.load_checkpoint(cfg.training.load_weights_from, weights_only=True)
     if cfg.training.get("resume_from"):

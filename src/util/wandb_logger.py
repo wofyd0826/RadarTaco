@@ -37,6 +37,11 @@ class WandbLogger:
         )
         wandb.define_metric("train/*", step_metric="train/step")
         wandb.define_metric("eval/*", step_metric="eval/step")
+        # Extra val domains share the primary eval/step axis so they line
+        # up epoch-by-epoch with nuScenes. wandb only accepts suffix glob
+        # patterns (`prefix/*`), so each extra prefix must be registered
+        # individually — add new lines here if more domains are added.
+        wandb.define_metric("eval_zju/*", step_metric="eval/step")
 
     def log_training_step(self, step: int, loss_dict: Dict[str, float], lr: float,
                           extras: Optional[Dict[str, float]] = None):
@@ -52,11 +57,19 @@ class WandbLogger:
                 d[f"train/{k}"] = v
         self.wandb.log(d)
 
-    def log_validation(self, step: int, eval_results: Dict, images: Optional[Dict] = None):
-        """Flatten nested dict and log in a single call so wandb doesn't drop later steps."""
+    def log_validation(self, step: int, eval_results: Dict,
+                       images: Optional[Dict] = None, prefix: str = "eval"):
+        """Flatten nested dict and log in a single call so wandb doesn't drop later steps.
+
+        `prefix` controls the wandb key namespace, e.g.
+            prefix="eval"      → eval/overall/0-80m/mae
+            prefix="eval_zju"  → eval_zju/overall/0-80m/mae
+        Different prefixes can be logged at the same step for side-by-side
+        domain comparison (nuScenes vs ZJU val) without overwriting.
+        """
         if not self.enabled:
             return
-        flat = {"eval/step": step}
+        flat = {f"{prefix}/step": step}
         for category, ranges in eval_results.items():
             if not isinstance(ranges, dict):
                 continue
@@ -64,7 +77,7 @@ class WandbLogger:
                 if not isinstance(metrics, dict):
                     continue
                 for metric_name, value in metrics.items():
-                    flat[f"eval/{category}/{range_name}/{metric_name}"] = value
+                    flat[f"{prefix}/{category}/{range_name}/{metric_name}"] = value
         if images:
             for name, img in images.items():
                 flat[name] = self.wandb.Image(img)

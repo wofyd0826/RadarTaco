@@ -73,10 +73,27 @@ VKITTI2_INTRINSIC: Dict[str, float] = {
     "H_orig": 375,
 }
 
+# ZJU-4DRadarCam (RadarCam-Depth) — values from the dataset owner
+# (github.com/MMOCKING/RadarCam-Depth issue #7 comment 2146469866).
+# Distortion (k1, k2, p1, p2) = [-0.0351, 0.0298, -0.00069, 0.00077]
+# are all <0.04 so we omit them — the radar npy in this dataset is
+# already in undistorted projected coords, and `expand_to_6ch` only
+# inverse-projects (x_pix, y_pix, depth) into ego 3D for kNN distances,
+# which are scale-consistent regardless of small distortion residuals.
+ZJU_4DRADARCAM_INTRINSIC: Dict[str, float] = {
+    "fx": 643.6709,
+    "fy": 643.5426,
+    "cx": 631.3498,
+    "cy": 367.3104,
+    "W_orig": 1280,
+    "H_orig": 720,
+}
+
 INTRINSICS_BY_NAME: Dict[str, Dict[str, float]] = {
     "nuscenes": NUSCENES_CAM_FRONT_INTRINSIC,
     "hypersim": HYPERSIM_INTRINSIC,
     "vkitti2": VKITTI2_INTRINSIC,
+    "zju_4dradarcam": ZJU_4DRADARCAM_INTRINSIC,
 }
 
 

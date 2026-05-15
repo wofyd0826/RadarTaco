@@ -17,10 +17,15 @@ All concrete datasets emit a unified output dict:
     depth_gt_dense     [1, H, W] float32  (dense or interp-densified)
     valid_mask_lidar   [1, H, W] bool
     valid_mask_dense   [1, H, W] bool
+    rel_depth          [1, H, W] float32  (initial relative depth `D*` for
+                                           paper §3.3 plug-in mode; zeros
+                                           when source PNG missing or when
+                                           dropped via rel_depth_dropout_prob)
     is_night           bool (False for sim datasets)
     is_sim             bool (True for sim datasets)
     sample_id          str
 """
+import os
 import random
 from abc import ABC, abstractmethod
 from typing import Dict, Optional, Tuple
@@ -37,7 +42,7 @@ from .intrinsics import (CH_DEPTH, CH_FRONT, CH_LEFT, CH_UP,           # noqa: F
 
 class BaseRadarDepthDataset(Dataset, ABC):
     SPATIAL_KEYS = ("rgb_norm", "depth_gt_lidar", "depth_gt_dense",
-                    "valid_mask_lidar", "valid_mask_dense")
+                    "valid_mask_lidar", "valid_mask_dense", "rel_depth")
 
     def __init__(
         self,
@@ -49,6 +54,12 @@ class BaseRadarDepthDataset(Dataset, ABC):
         augmentation: bool = True,
         lr_flip_p: float = 0.5,
         photometric_aug=None,                                # NightLikeAugmentation or None
+        # Plug-in mode (paper §3.3-§3.4):
+        #   rel_depth_dropout_prob — probability of setting rel_depth to
+        #     zeros for a given sample (training time). Set to 0.5 to
+        #     match paper §3.4 "two equal portions" — half samples get
+        #     real D*, half get zeros (independent mode).
+        rel_depth_dropout_prob: float = 0.0,
     ):
         super().__init__()
         self.max_radar_points = max_radar_points
@@ -59,6 +70,7 @@ class BaseRadarDepthDataset(Dataset, ABC):
         self.augmentation = augmentation
         self.lr_flip_p = lr_flip_p
         self.photometric_aug = photometric_aug
+        self.rel_depth_dropout_prob = float(rel_depth_dropout_prob)
 
     @abstractmethod
     def __len__(self) -> int: ...
@@ -98,6 +110,27 @@ class BaseRadarDepthDataset(Dataset, ABC):
         return (torch.from_numpy(depth).unsqueeze(0).float(),
                 torch.from_numpy(valid).unsqueeze(0).bool())
 
+    def _load_rel_depth(self, path: Optional[str], shape_hw: Tuple[int, int]) -> torch.Tensor:
+        """Load `D*` PNG for paper §3.3 plug-in mode.
+
+        - `path` None or missing → return zeros (independent-mode signal).
+        - PNG uint16 stored as `(rel × 1000)` clipped to [0, 65.535].
+        - With probability `rel_depth_dropout_prob` (training only),
+          force the loaded tensor to zeros, implementing paper §3.4's
+          stochastic 50/50 plug-in/independent mode mixing.
+        """
+        from PIL import Image as _PIL                                            # local import
+        H, W = shape_hw
+        if path is not None and os.path.exists(path):
+            arr = np.asarray(_PIL.open(path), dtype=np.float32) / 1000.0
+            t = torch.from_numpy(arr).unsqueeze(0).float()
+        else:
+            t = torch.zeros(1, H, W, dtype=torch.float32)
+        if self.augmentation and self.rel_depth_dropout_prob > 0.0 \
+                and random.random() < self.rel_depth_dropout_prob:
+            t = torch.zeros_like(t)
+        return t
+
     # ----------------------------------------------------------- transforms --
     def _apply_resize(self, sample: Dict) -> Dict:
         if self.resize_to_hw is None:
@@ -116,6 +149,12 @@ class BaseRadarDepthDataset(Dataset, ABC):
         for key in ("depth_gt_lidar", "depth_gt_dense"):
             sample[key] = tv_resize(sample[key], [target_h, target_w],
                                     interpolation=InterpolationMode.NEAREST_EXACT)
+        if "rel_depth" in sample:
+            # Bilinear OK for relative depth — dense, not a sparse sensor map.
+            sample["rel_depth"] = tv_resize(
+                sample["rel_depth"], [target_h, target_w],
+                interpolation=InterpolationMode.BILINEAR, antialias=True,
+            )
         for key in ("valid_mask_lidar", "valid_mask_dense"):
             sample[key] = tv_resize(sample[key].float(), [target_h, target_w],
                                     interpolation=InterpolationMode.NEAREST_EXACT).bool()

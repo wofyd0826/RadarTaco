@@ -42,24 +42,24 @@ from src.model.rgb_only import RGBOnlyDepth                                  # n
 
 def _maybe_override_model_from_ckpt(cfg) -> None:
     """If the checkpoint sits next to a saved `config.yaml`, override
-    `cfg.model` with the one used to train the checkpoint. Prevents the
-    common "wrong model class on strict load" failure when `model=...`
-    isn't passed on the eval command line."""
+    `cfg.model` with the one used to train the checkpoint. Also restore
+    `dataset.rel_depth_dir` from the saved config so plug-in eval can
+    locate the same `D*` directory that was used during training."""
     sibling = os.path.join(os.path.dirname(cfg.checkpoint), "config.yaml")
     if not os.path.exists(sibling):
         return
     saved = OmegaConf.load(sibling)
-    saved_model = saved.get("model", None)
-    if saved_model is None:
-        return
-    cur_name = str(cfg.model.get("name", "radartaco")).lower()
-    saved_name = str(saved_model.get("name", "radartaco")).lower()
-    if cur_name == saved_name:
-        return
-    logger.info(f"auto-overriding cfg.model from {sibling}: "
-                f"{cur_name} -> {saved_name}")
     OmegaConf.set_struct(cfg, False)
-    cfg.model = saved_model
+    saved_model = saved.get("model", None)
+    if saved_model is not None:
+        logger.info(f"restoring cfg.model from {sibling}")
+        cfg.model = saved_model
+    saved_ds = saved.get("dataset", None)
+    if saved_ds is not None:
+        rdd = saved_ds.get("rel_depth_dir", None)
+        if rdd is not None and cfg.dataset.get("rel_depth_dir", None) is None:
+            logger.info(f"restoring cfg.dataset.rel_depth_dir={rdd} from {sibling}")
+            cfg.dataset.rel_depth_dir = rdd
     OmegaConf.set_struct(cfg, True)
 
 
@@ -89,6 +89,7 @@ def _build_eval_model(cfg, device):
             min_depth_clip=float(cfg.model.get("min_depth_clip", 0.5)),
             multi_scale=bool(cfg.model.get("multi_scale", False)),
             multi_scale_levels=tuple(cfg.model.get("multi_scale_levels", (2, 4, 8, 16))),
+            use_aux_branch=bool(cfg.model.get("use_aux_branch", False)),
         )
     return m.to(device).eval()
 
@@ -102,7 +103,9 @@ def main(cfg: DictConfig) -> None:
     if not cfg.get("checkpoint"):
         raise SystemExit("checkpoint=<path/to/.pt> is required (Hydra override).")
     _maybe_override_model_from_ckpt(cfg)
-    out_dir = cfg.get("eval_out_dir", os.path.join(os.path.dirname(cfg.checkpoint), "eval"))
+    eval_mode = str(cfg.get("eval_mode", "independent")).lower()
+    out_dir = cfg.get("eval_out_dir",
+                      os.path.join(os.path.dirname(cfg.checkpoint), f"eval_{eval_mode}"))
     os.makedirs(out_dir, exist_ok=True)
     viz_dir = os.path.join(out_dir, "viz")
     os.makedirs(viz_dir, exist_ok=True)
@@ -122,17 +125,25 @@ def main(cfg: DictConfig) -> None:
         raise SystemExit(f"split file not found: {split_file}")
     logger.info(f"eval split: {split} → {split_file}")
 
+    # `eval_mode` selects how the plug-in branch (if present) is fed at
+    # eval time. "independent" = pass zeros (paper Table 1 Indep row).
+    # "plugin"     = use the precomputed D* from rel_depth_dir.
+    # Default "independent" so legacy eval calls keep working.
+    use_rel_depth = (eval_mode == "plugin")
     ds = NuScenesRadarDepthDataset(
         data_root=cfg.dataset.data_root,
         split_file=split_file,
         dense_gt_dir=cfg.dataset.get("dense_gt_dir", "depth_acc"),
         radar_3d_dir=cfg.dataset.get("radar_3d_dir", "radar_3d"),
         night_ids_file=cfg.dataset.get("night_ids_file", None),
+        rel_depth_dir=cfg.dataset.get("rel_depth_dir", None) if use_rel_depth else None,
+        rel_depth_dropout_prob=0.0,
         max_radar_points=int(cfg.dataset.max_radar_points),
         max_depth=float(cfg.dataset.max_depth),
         min_depth=float(cfg.dataset.min_depth),
         resize_to_hw=None, augmentation=False,
     )
+    logger.info(f"eval mode: {eval_mode}  (rel_depth_dir used: {use_rel_depth})")
     loader = DataLoader(ds, batch_size=1, shuffle=False,
                         num_workers=int(cfg.dataset.num_workers), pin_memory=True)
 
@@ -152,7 +163,8 @@ def main(cfg: DictConfig) -> None:
         batch = {k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v)
                  for k, v in batch.items()}
         with torch.inference_mode():
-            pred = model(batch["rgb_norm"], batch["radar_points"], batch["radar_mask"])
+            pred = model(batch["rgb_norm"], batch["radar_points"], batch["radar_mask"],
+                         batch.get("rel_depth"))
         pn = pred[0, 0].float().cpu().numpy()
         gn = batch["depth_gt_lidar"][0, 0].cpu().numpy()
         mn = batch["valid_mask_lidar"][0, 0].cpu().numpy().astype(bool)

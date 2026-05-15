@@ -1,0 +1,21 @@
+# Plug-in mode (paper §3.3 + §3.4 + Supp §8.3): RadarTaco + auxiliary
+# input branch that fuses initial relative depth `D*` (from a frozen
+# mono depth predictor like DPT-Hybrid) with image features at every
+# pyramid scale. Training is run with `dataset.rel_depth_dropout_prob=0.5`
+# (paper §3.4 "two equal portions") so a single model serves both
+# independent (D*=0) and plug-in (D*=DPT prediction) inference modes.
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 20
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+# Plug-in mode toggle. When true, RadarTaco instantiates the
+# AuxiliaryDepthBranch and accepts an extra `rel_depth` forward arg.
+use_aux_branch: true
