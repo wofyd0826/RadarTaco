@@ -389,6 +389,7 @@ def _build_mixed_batch_loader(cfg, sim_loaders_unused, val_loader, val_loaders_e
     real_noise = sim_cfg.get("real_noise", None)
     if real_noise is not None:
         base_sim_kw["real_noise"] = OmegaConf.to_container(real_noise, resolve=True)
+    aspect_match = bool(sim_cfg.get("aspect_match", True))
     sim_loaders_q = []
     for (name, sub), quota in zip(sim_sources, quotas_sim):
         sim_mode = sub.get("radar_simulation", None) or sim_cfg.radar_simulation
@@ -401,6 +402,7 @@ def _build_mixed_batch_loader(cfg, sim_loaders_unused, val_loader, val_loaders_e
             radar_simulation=sim_mode,
             class_weights=cls_w,
             resize_to_hw=nusc_resize,                  # ← force nuScenes shape
+            aspect_match=aspect_match,                 # ← center-crop to nuScenes aspect first
             augmentation=True,
             photometric_aug=photometric_aug,
             **common, **base_sim_kw,

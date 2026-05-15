@@ -54,6 +54,12 @@ class BaseRadarDepthDataset(Dataset, ABC):
         augmentation: bool = True,
         lr_flip_p: float = 0.5,
         photometric_aug=None,                                # NightLikeAugmentation or None
+        # When `aspect_match=True` and `resize_to_hw` is set, the
+        # _apply_resize step first center-crops the source frame to the
+        # target aspect ratio, then resizes — preserving object proportions
+        # instead of stretching. Useful when matching e.g. vKITTI2
+        # (3.31:1) to nuScenes (1.78:1) for batch_mix.
+        aspect_match: bool = False,
         # Plug-in mode (paper §3.3-§3.4):
         #   rel_depth_dropout_prob — probability of setting rel_depth to
         #     zeros for a given sample (training time). Set to 0.5 to
@@ -70,6 +76,7 @@ class BaseRadarDepthDataset(Dataset, ABC):
         self.augmentation = augmentation
         self.lr_flip_p = lr_flip_p
         self.photometric_aug = photometric_aug
+        self.aspect_match = bool(aspect_match)
         self.rel_depth_dropout_prob = float(rel_depth_dropout_prob)
 
     @abstractmethod
@@ -139,8 +146,31 @@ class BaseRadarDepthDataset(Dataset, ABC):
         _, orig_h, orig_w = sample["rgb_norm"].shape
         if orig_h == target_h and orig_w == target_w:
             return sample
-        scale_y = target_h / orig_h
-        scale_x = target_w / orig_w
+
+        # ── optional aspect-preserving center crop ──
+        # If src aspect ≠ target aspect and aspect_match is on, crop the
+        # excess (horizontal or vertical) from the centre so the post-crop
+        # aspect equals the target. Otherwise the resize below stretches.
+        x0 = y0 = 0
+        crop_h, crop_w = orig_h, orig_w
+        if self.aspect_match:
+            src_aspect = orig_w / orig_h
+            tgt_aspect = target_w / target_h
+            if abs(src_aspect - tgt_aspect) > 1e-3:
+                if src_aspect > tgt_aspect:
+                    # too wide → crop horizontally
+                    crop_w = int(round(orig_h * tgt_aspect))
+                    x0 = (orig_w - crop_w) // 2
+                else:
+                    # too tall → crop vertically
+                    crop_h = int(round(orig_w / tgt_aspect))
+                    y0 = (orig_h - crop_h) // 2
+                for key in self.SPATIAL_KEYS:
+                    if key in sample:
+                        sample[key] = sample[key][..., y0:y0 + crop_h, x0:x0 + crop_w]
+
+        scale_y = target_h / crop_h
+        scale_x = target_w / crop_w
 
         sample["rgb_norm"] = tv_resize(
             sample["rgb_norm"], [target_h, target_w],
@@ -160,10 +190,22 @@ class BaseRadarDepthDataset(Dataset, ABC):
                                     interpolation=InterpolationMode.NEAREST_EXACT).bool()
 
         radar = sample["radar_points"]
-        m = sample["radar_mask"]
-        # Only the image-pixel channels (CH_XPIX, CH_YPIX) scale with resize.
-        # Camera-frame (xc, yc, zc) and depth are physical meter quantities
-        # and are invariant to image resampling.
+        m = sample["radar_mask"].clone()
+        # Two-step coord update for radar pixels: first shift by crop offset,
+        # drop points outside the crop window, then scale by resize factor.
+        # Camera-frame (front, left, up) and depth are physical meter
+        # quantities and are invariant to both crop and resample.
+        if m.any() and (x0 != 0 or y0 != 0 or crop_w != orig_w or crop_h != orig_h):
+            xs = radar[:, CH_XPIX] - x0
+            ys = radar[:, CH_YPIX] - y0
+            in_bounds = (m
+                         & (xs >= 0) & (xs < crop_w)
+                         & (ys >= 0) & (ys < crop_h))
+            radar[:, CH_XPIX] = torch.where(in_bounds, xs, torch.zeros_like(xs))
+            radar[:, CH_YPIX] = torch.where(in_bounds, ys, torch.zeros_like(ys))
+            radar[~in_bounds] = 0.0
+            sample["radar_mask"] = in_bounds
+            m = in_bounds
         radar[m, CH_XPIX] *= scale_x
         radar[m, CH_YPIX] *= scale_y
         sample["radar_points"] = radar

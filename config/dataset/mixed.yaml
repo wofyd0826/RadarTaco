@@ -41,6 +41,11 @@ sim:
   # + 6 sim per batch). Requires all sources to share H/W; sim sources
   # are auto-resized to nuScenes resolution when this is on.
   batch_mix: false
+  # When batch_mix is on, aspect_match=true center-crops sim sources to
+  # the nuScenes aspect ratio before resizing — preserving object
+  # proportions instead of stretching (vKITTI2 3.31:1 → nuScenes 1.78:1).
+  # Some side regions of the sim image are dropped.
+  aspect_match: true
   ratio_real: 0.7              # weight for nuScenes
   ratio_sim: 0.3               # total weight for the union of sim datasets
   radar_simulation: augmented
