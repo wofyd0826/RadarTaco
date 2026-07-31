@@ -208,11 +208,17 @@ def main(cfg: DictConfig) -> None:
     if target is None or target.last_attn is None:
         raise SystemExit(f"no recorded attention for layer={layer} block={block}")
 
-    attn = target.last_attn[0]                             # (heads, H_l, W_l, K)
+    attn = target.last_attn[0]                             # (heads, H_l, W_l, K+1)
     keep = target.last_keep[0]                             # (H_l, W_l, K)
     H_l, W_l = target.last_hw
     H_img, W_img = in_size
     logger.info(f"recorded attention: shape={tuple(attn.shape)}  feat_hw={(H_l, W_l)}")
+
+    # Last column is the null ("no radar applies here") token — report how much
+    # mass lands there, then drop it so the map lines up with the radar points.
+    null_share = float(attn[..., -1].mean())
+    logger.info(f"null-token attention share: {100 * null_share:.1f}%")
+    attn = attn[..., :keep.shape[-1]]
 
     # mean over heads → (H_l, W_l, K)
     attn_mean = attn.mean(dim=0).numpy().astype(np.float32)

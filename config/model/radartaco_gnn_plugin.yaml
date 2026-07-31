@@ -6,7 +6,7 @@
 # independent (D*=0) and plug-in (D*=DPT prediction) inference modes.
 name: radartaco
 radar_encoder: gnn
-k_neighbors: 20
+k_neighbors: 8
 mlp_hidden: 128
 a_l: [48.0, 32.0, 16.0]
 radar_channels: [64, 128, 512]

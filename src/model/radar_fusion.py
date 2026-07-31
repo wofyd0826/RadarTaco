@@ -50,6 +50,15 @@ class RadarCenteredAttention(nn.Module):
         self.k_proj = nn.Linear(kv_dim, ch)
         self.v_proj = nn.Linear(kv_dim, ch)
         self.out_proj = nn.Linear(ch, ch)
+        # "No radar applies to me" token. The softmax normalises over the radar
+        # axis, so without it every pixel inside the window must spend a full
+        # unit of attention mass on some radar point — even though only ~10% of
+        # in-window pixels actually match one in depth. The null key gives the
+        # remaining 90% somewhere to put that mass; `v_null` starts at zero so
+        # attending to it initially contributes no message.
+        self.k_null = nn.Parameter(torch.zeros(1, 1, ch))
+        self.v_null = nn.Parameter(torch.zeros(1, 1, ch))
+        nn.init.normal_(self.k_null, std=0.02)
 
     def forward(
         self,
@@ -66,7 +75,11 @@ class RadarCenteredAttention(nn.Module):
         # Build (B, W, K) horizontal-window mask, broadcast across rows.
         scale = W / float(image_w)
         x_p = radar_x_orig * scale                                    # (B, K)
-        a_pix = self.a_l * scale
+        # `a_l` is in input-image pixels, so at deep levels it shrinks below one
+        # feature column (0.5 at f5, 0.25 at f6) and half the radar points stop
+        # matching any column at all. Floor it at one column so every point
+        # keeps at least its own column.
+        a_pix = max(self.a_l * scale, 1.0)
         col = torch.arange(W, device=device).float()                  # (W,)
         col_mask = (col[None, :, None] - x_p[:, None, :]).abs() < a_pix
         col_mask = col_mask & radar_mask[:, None, :]                  # zero out padded keys
@@ -77,22 +90,30 @@ class RadarCenteredAttention(nn.Module):
         k = self.k_proj(kv).view(B, K, self.heads, self.head_dim).transpose(1, 2)      # (B,h,K,d)
         v = self.v_proj(kv).view(B, K, self.heads, self.head_dim).transpose(1, 2)
 
+        # Append the null key/value — always visible, never masked.
+        k_null = self.k_null.view(1, 1, self.heads, self.head_dim).transpose(1, 2)
+        v_null = self.v_null.view(1, 1, self.heads, self.head_dim).transpose(1, 2)
+        k = torch.cat([k, k_null.expand(B, -1, -1, -1).to(k.dtype)], dim=2)   # (B,h,K+1,d)
+        v = torch.cat([v, v_null.expand(B, -1, -1, -1).to(v.dtype)], dim=2)
+
         # Build (B, HW, K) keep mask (expand col_mask along H rows).
         attn_keep = col_mask[:, None, :, :].expand(-1, H, -1, -1).reshape(B, H * W, K)
         any_valid_pix = attn_keep.any(dim=-1, keepdim=True)
-        # Safe rows so SDPA doesn't NaN on fully-masked rows; we zero output later.
-        safe_keep = torch.where(any_valid_pix.expand_as(attn_keep),
-                                attn_keep, torch.ones_like(attn_keep))
-        attn_bias = torch.zeros_like(safe_keep, dtype=q.dtype)
-        attn_bias = attn_bias.masked_fill(~safe_keep, float("-inf")).unsqueeze(1)
+        # The null column is always open, so no row is fully -inf and softmax
+        # cannot NaN — the previous `safe_keep` workaround is unnecessary.
+        bias_radar = torch.zeros_like(attn_keep, dtype=q.dtype)
+        bias_radar = bias_radar.masked_fill(~attn_keep, float("-inf"))
+        bias_null = torch.zeros(B, H * W, 1, dtype=q.dtype, device=device)
+        attn_bias = torch.cat([bias_radar, bias_null], dim=-1).unsqueeze(1)
 
         if self.record_attention:
             # Manual path: compute & cache softmax(QK^T / √d) for visualization.
-            scores = (q @ k.transpose(-1, -2)) * self.scale            # (B, h, HW, K)
+            # Cached maps have K+1 columns; the last one is the null token.
+            scores = (q @ k.transpose(-1, -2)) * self.scale            # (B, h, HW, K+1)
             scores = scores + attn_bias                                 # broadcast head dim
             attn = torch.softmax(scores, dim=-1)
             out = attn @ v                                              # (B, h, HW, d)
-            self.last_attn = attn.detach().reshape(B, self.heads, H, W, K).cpu()
+            self.last_attn = attn.detach().reshape(B, self.heads, H, W, K + 1).cpu()
             self.last_keep = attn_keep.detach().reshape(B, H, W, K).cpu()
             self.last_hw = (H, W)
         else:
@@ -110,6 +131,12 @@ class _FusionBlock(nn.Module):
     def __init__(self, ch: int, kv_dim: int, heads: int, a_l: float, mlp_ratio: float = 2.0) -> None:
         super().__init__()
         self.norm1 = nn.GroupNorm(1, ch)
+        # The query stream is normalised, so the context has to be too
+        # (Perceiver-style). Raw `E_l` rows are softmax outputs with elements
+        # around 1/K ≈ 0.009 — two orders below the normalised queries — which
+        # let `v_proj`'s bias dominate the value vectors and made them nearly
+        # identical across radar points.
+        self.norm_kv = nn.LayerNorm(kv_dim)
         self.attn = RadarCenteredAttention(ch, kv_dim, heads, a_l)
         self.norm2 = nn.GroupNorm(1, ch)
         hidden = int(ch * mlp_ratio)
@@ -120,7 +147,8 @@ class _FusionBlock(nn.Module):
         )
 
     def forward(self, feat, kv, radar_x_orig, radar_mask, image_w):
-        feat = feat + self.attn(self.norm1(feat), kv, radar_x_orig, radar_mask, image_w)
+        feat = feat + self.attn(self.norm1(feat), self.norm_kv(kv),
+                                radar_x_orig, radar_mask, image_w)
         feat = feat + self.mlp(self.norm2(feat))
         return feat
 
