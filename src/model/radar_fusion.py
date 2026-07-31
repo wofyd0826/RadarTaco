@@ -19,6 +19,61 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _pad_token_index(sel: torch.Tensor):
+    """(B, T) bool → ((B, N) long token indices, (B, N) bool padding mask).
+
+    N is the largest per-sample selection count, so every sample is packed into
+    the same dense layout and the attention stays a single batched call instead
+    of a Python loop over the batch.
+    """
+    B, T = sel.shape
+    counts = sel.sum(dim=-1)
+    n_max = int(counts.max().item())
+    idx = torch.zeros(B, max(n_max, 1), dtype=torch.long, device=sel.device)
+    valid = torch.zeros_like(idx, dtype=torch.bool)
+    if n_max == 0:
+        return idx, valid
+    b_i, t_i = sel.nonzero(as_tuple=True)
+    rank = (sel.cumsum(dim=-1) - 1)[b_i, t_i]        # position within its row
+    idx[b_i, rank] = t_i
+    valid[b_i, rank] = True
+    return idx, valid
+
+
+def _masked_group_norm(tok: torch.Tensor, valid: torch.Tensor,
+                       gn: nn.GroupNorm) -> torch.Tensor:
+    """`GroupNorm(1, C)` for a padded token list, ignoring padded slots.
+
+    `GroupNorm(1, C)` on (B, C, H, W) normalises over C*H*W per sample, i.e.
+    over every token and channel. Doing the same over the selected tokens makes
+    the expert normalise across its own routed set. With every token selected
+    the statistics are identical to the dense module, so the sparse path stays
+    exact in that case.
+    """
+    m = valid[..., None].to(tok.dtype)                       # (B, N, 1)
+    n = (valid.sum(dim=-1, dtype=tok.dtype) * tok.shape[-1]).clamp_min(1.0)
+    n = n[:, None, None]
+    x = tok * m
+    mean = x.sum(dim=(1, 2), keepdim=True) / n
+    var = (((tok - mean) * m) ** 2).sum(dim=(1, 2), keepdim=True) / n
+    out = (tok - mean) * torch.rsqrt(var + gn.eps)
+    return (out * gn.weight + gn.bias) * m
+
+
+def _scatter_tokens(tok: torch.Tensor, idx: torch.Tensor,
+                    valid: torch.Tensor, T: int) -> torch.Tensor:
+    """(B, N, C) token values → (B, T, C), zeros where nothing was selected.
+
+    Padded slots are routed to a scratch row at index T so they cannot race
+    with a genuine write to token 0.
+    """
+    B, _, C = tok.shape
+    idx_safe = torch.where(valid, idx, torch.full_like(idx, T))
+    buf = torch.zeros(B, T + 1, C, dtype=tok.dtype, device=tok.device)
+    buf.scatter_(1, idx_safe[..., None].expand(-1, -1, C), tok)
+    return buf[:, :T]
+
+
 class RadarCenteredAttention(nn.Module):
     """Multi-head Radar-centered cross-attention with horizontal-window mask.
 
@@ -67,10 +122,25 @@ class RadarCenteredAttention(nn.Module):
         radar_x_orig: torch.Tensor,    # (B, K) horizontal coord in input-image space
         radar_mask: torch.Tensor,      # (B, K) bool
         image_w: int,                  # actual input-image width (per forward call)
+        sel_idx: Optional[torch.Tensor] = None,    # (B, N) flat token indices
+        sel_valid: Optional[torch.Tensor] = None,  # (B, N) bool — padding of sel_idx
+        q_tok: Optional[torch.Tensor] = None,      # (B, N, C) pre-normalised queries
+        hw: Optional[Tuple[int, int]] = None,      # feature size when q_tok is used
     ) -> torch.Tensor:
-        B, C, H, W = feat.shape
+        """Returns (B, C, H, W) normally, or (B, N, C) when `sel_idx` is given.
+
+        `sel_idx` restricts the queries to a subset of pixels — used by
+        `MoEFusionBlock` so an expert only pays for the tokens routed to it.
+        Queries are independent, so the sparse path is exact for those tokens.
+        """
+        if q_tok is None:
+            B, C, H, W = feat.shape
+            device = feat.device
+        else:
+            B, _, C = q_tok.shape
+            H, W = hw
+            device = q_tok.device
         K = kv.shape[1]
-        device = feat.device
 
         # Build (B, W, K) horizontal-window mask, broadcast across rows.
         scale = W / float(image_w)
@@ -84,9 +154,19 @@ class RadarCenteredAttention(nn.Module):
         col_mask = (col[None, :, None] - x_p[:, None, :]).abs() < a_pix
         col_mask = col_mask & radar_mask[:, None, :]                  # zero out padded keys
 
-        # Queries from image pixels.
-        x = feat.permute(0, 2, 3, 1).reshape(B, H * W, C)
-        q = self.q_proj(x).view(B, H * W, self.heads, self.head_dim).transpose(1, 2)   # (B,h,HW,d)
+        # Queries from image pixels — all of them, or just the routed subset.
+        if q_tok is not None:
+            xq = q_tok
+            col_of = sel_idx % W                                          # (B, N)
+        elif sel_idx is None:
+            xq = feat.permute(0, 2, 3, 1).reshape(B, H * W, C)
+            col_of = (torch.arange(H * W, device=device) % W)[None].expand(B, -1)
+        else:
+            x = feat.permute(0, 2, 3, 1).reshape(B, H * W, C)
+            xq = torch.gather(x, 1, sel_idx[..., None].expand(-1, -1, C))
+            col_of = sel_idx % W
+        N = xq.shape[1]
+        q = self.q_proj(xq).view(B, N, self.heads, self.head_dim).transpose(1, 2)      # (B,h,N,d)
         k = self.k_proj(kv).view(B, K, self.heads, self.head_dim).transpose(1, 2)      # (B,h,K,d)
         v = self.v_proj(kv).view(B, K, self.heads, self.head_dim).transpose(1, 2)
 
@@ -96,33 +176,37 @@ class RadarCenteredAttention(nn.Module):
         k = torch.cat([k, k_null.expand(B, -1, -1, -1).to(k.dtype)], dim=2)   # (B,h,K+1,d)
         v = torch.cat([v, v_null.expand(B, -1, -1, -1).to(v.dtype)], dim=2)
 
-        # Build (B, HW, K) keep mask (expand col_mask along H rows).
-        attn_keep = col_mask[:, None, :, :].expand(-1, H, -1, -1).reshape(B, H * W, K)
+        # Per-token keep mask: each token inherits its column's mask.
+        attn_keep = torch.gather(col_mask, 1, col_of[..., None].expand(-1, -1, K))  # (B,N,K)
         any_valid_pix = attn_keep.any(dim=-1, keepdim=True)
         # The null column is always open, so no row is fully -inf and softmax
         # cannot NaN — the previous `safe_keep` workaround is unnecessary.
         bias_radar = torch.zeros_like(attn_keep, dtype=q.dtype)
         bias_radar = bias_radar.masked_fill(~attn_keep, float("-inf"))
-        bias_null = torch.zeros(B, H * W, 1, dtype=q.dtype, device=device)
+        bias_null = torch.zeros(B, N, 1, dtype=q.dtype, device=device)
         attn_bias = torch.cat([bias_radar, bias_null], dim=-1).unsqueeze(1)
 
         if self.record_attention:
             # Manual path: compute & cache softmax(QK^T / √d) for visualization.
             # Cached maps have K+1 columns; the last one is the null token.
-            scores = (q @ k.transpose(-1, -2)) * self.scale            # (B, h, HW, K+1)
+            scores = (q @ k.transpose(-1, -2)) * self.scale            # (B, h, N, K+1)
             scores = scores + attn_bias                                 # broadcast head dim
             attn = torch.softmax(scores, dim=-1)
-            out = attn @ v                                              # (B, h, HW, d)
-            self.last_attn = attn.detach().reshape(B, self.heads, H, W, K + 1).cpu()
-            self.last_keep = attn_keep.detach().reshape(B, H, W, K).cpu()
-            self.last_hw = (H, W)
+            out = attn @ v                                              # (B, h, N, d)
+            if sel_idx is None:                     # recording only makes sense dense
+                self.last_attn = attn.detach().reshape(B, self.heads, H, W, K + 1).cpu()
+                self.last_keep = attn_keep.detach().reshape(B, H, W, K).cpu()
+                self.last_hw = (H, W)
         else:
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
-        out = out.transpose(1, 2).reshape(B, H * W, C)
+        out = out.transpose(1, 2).reshape(B, N, C)
         out = self.out_proj(out)
         # Pixels with no valid radar in window → zero contribution (residual passthrough).
         out = out * any_valid_pix.to(out.dtype)
-        return out.transpose(1, 2).reshape(B, C, H, W)
+        if sel_idx is None and q_tok is None:
+            return out.transpose(1, 2).reshape(B, C, H, W)
+        # Padded slots must not carry a message back to the scatter.
+        return out * sel_valid[..., None].to(out.dtype)
 
 
 class _FusionBlock(nn.Module):
@@ -146,11 +230,36 @@ class _FusionBlock(nn.Module):
             nn.Conv2d(hidden, ch, 1),
         )
 
-    def forward(self, feat, kv, radar_x_orig, radar_mask, image_w):
-        feat = feat + self.attn(self.norm1(feat), self.norm_kv(kv),
-                                radar_x_orig, radar_mask, image_w)
-        feat = feat + self.mlp(self.norm2(feat))
-        return feat
+    def forward(self, feat, kv, radar_x_orig, radar_mask, image_w, sel=None):
+        """`sel`: optional (B, H, W) bool. When given the whole block — norms,
+        attention and MLP — runs only on those tokens, and the returned tensor
+        equals `feat` outside them, i.e. the block's delta is confined to the
+        selected positions.
+
+        The norms use `_masked_group_norm`, so an expert normalises over the
+        token set routed to it. With every token selected that reduces to the
+        dense `GroupNorm(1, C)`, keeping the two paths consistent.
+        """
+        kv = self.norm_kv(kv)
+        if sel is None:
+            feat = feat + self.attn(self.norm1(feat), kv,
+                                    radar_x_orig, radar_mask, image_w)
+            feat = feat + self.mlp(self.norm2(feat))
+            return feat
+
+        B, C, H, W = feat.shape
+        flat = feat.permute(0, 2, 3, 1).reshape(B, H * W, C)
+        idx, valid = _pad_token_index(sel.reshape(B, H * W))
+        xt = torch.gather(flat, 1, idx[..., None].expand(-1, -1, C))       # (B, N, C)
+
+        n1 = _masked_group_norm(xt, valid, self.norm1)
+        h = xt + self.attn(None, kv, radar_x_orig, radar_mask, image_w,
+                           sel_idx=idx, sel_valid=valid, q_tok=n1, hw=(H, W))
+        n2 = _masked_group_norm(h, valid, self.norm2)
+        h = h + self.mlp(n2.transpose(1, 2).unsqueeze(-1)).squeeze(-1).transpose(1, 2)
+
+        delta = (h - xt) * valid[..., None].to(h.dtype)
+        return feat + _scatter_tokens(delta, idx, valid, H * W).transpose(1, 2).reshape(B, C, H, W)
 
 
 class MoEFusionBlock(nn.Module):
@@ -312,17 +421,24 @@ class MoEFusionBlock(nn.Module):
             else:
                 gate = probs
 
-        # Run every expert (K=3 is cheap enough). Per-token gate broadcasts
-        # over the channel dim. Each expert returns feat + delta_expert
-        # (residual applied inside _FusionBlock). Because Σ_k gate[k] = 1
-        # per token, the mixed non-shared side is naturally
+        # Each expert runs ONLY on the tokens routed to it. Because Σ_k gate[k]
+        # = 1 per token, the mixture is
         #    Σ_k gate[k] · (feat + delta_k) = feat + Σ_k gate[k] · delta_k
-        # → residual is applied exactly once.
-        expert_outs = torch.stack([
-            e(feat, kv, radar_x_orig, radar_mask, image_w)
-            for e in self.experts
-        ], dim=1)                                                # (B, K, C, H, W)
-        mixed = (gate.unsqueeze(2) * expert_outs).sum(dim=1)     # feat + weighted_delta
+        # so the residual is applied exactly once and tokens with gate[k] == 0
+        # contribute nothing — computing delta_k there was pure waste. With
+        # top-1 routing the measured occupancy is 48/32/21%, i.e. the dense
+        # version paid 3x for the MoE blocks. An expert nobody selects is
+        # skipped entirely. With a dense gate (top_k=None) every token selects
+        # every expert and this degrades gracefully to the old behaviour.
+        mixed = feat
+        for e_i, expert in enumerate(self.experts):
+            sel = gate[:, e_i] > 0                               # (B, H, W)
+            if not bool(sel.any()):
+                continue
+            dense = bool(sel.all())
+            out_e = expert(feat, kv, radar_x_orig, radar_mask, image_w,
+                           sel=None if dense else sel)
+            mixed = mixed + gate[:, e_i:e_i + 1] * (out_e - feat)
 
         if self.shared is not None:
             # Shared expert also returns feat + delta_shared. Naively adding
