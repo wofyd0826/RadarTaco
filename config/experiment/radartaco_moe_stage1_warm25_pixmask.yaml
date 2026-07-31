@@ -1,0 +1,53 @@
+# @package _global_
+# Stage-1 (teacher-forcing) + per-pixel bin mask — warm25 pipeline.
+#
+# Same as radartaco_moe_stage1_warm25.yaml with ONE change:
+#   • loss.moe_pixel_bin_mask=true — each pixel supervised only when its
+#     depth bin equals the routed bin of the token containing it.
+#     Reproduces the fusion-only specialist regime inside MoE.
+#
+# Pixel mask uses model.router_gts (majority-vote per-token bin, computed
+# in MoEFusionBlock stage 1) + depth_gt_dense to intersect valid_mask.
+defaults:
+  - override /model: radartaco_moe
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 1
+  moe_use_shared: false
+  moe_top_k: 1
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 10.0
+  moe_pixel_bin_mask: true
+  moe_pixel_bin_mask_bins: [0.0, 20.0, 50.0, 100.0]
+
+training:
+  epochs: 15
+  load_weights_from: output/radartaco_moe_warm_from_baseline25/init.pt
+
+wandb:
+  name: radartaco_moe_stage1_warm25_pixmask
+  tags: [moe, stage1, teacher-forcing, warm-start-baseline25, no-shared, pixel-mask]
+  notes: >
+    Stage-1 MoE warm25 + per-pixel bin mask. Each expert supervised only
+    on its own bin's pixels within routed tokens.

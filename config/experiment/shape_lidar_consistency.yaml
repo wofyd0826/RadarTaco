@@ -1,0 +1,73 @@
+# @package _global_
+# Option 2: Standard affine-invariant shape (pure shape supervision)
+#           + full-strength L1(pred, lidar) BUT only on LiDAR pixels
+#             where |dense_gt − lidar| < threshold.
+#
+# Rationale (diagnostic-driven):
+#   Per-sample Spearman ρ(per-row |dense-lidar|, per-row pred-jump) ≈ 0.88
+#   on baseline shape_lidar. The rows producing stripes are precisely
+#   the rows where dense_gt and lidar disagree by more than a couple of
+#   meters. Mask them out of the L1_lidar term and the conflict that
+#   drives the per-row hard fit disappears — while the consistent ~90%
+#   of LiDAR pixels still carry full-strength metric supervision.
+#
+# Loss formula (real samples):
+#   keep_lidar = (|dense_gt − lidar| < lidar_consistency_threshold)
+#              & valid_mask_lidar & valid_mask_dense
+#
+#   L = w_lidar          · L1(pred, lidar, keep_lidar)
+#     + w_shape_global   · AffineInvariantL1(pred, dense_gt)
+#     + w_shape_grid     · BlockGridAffineInvariantL1(pred, dense_gt, K=8)
+#
+# Threshold guide (per smoke residual distribution: q90 ≈ 1.6 m, max ≈ 23 m):
+#   th = 1.0  → keep ~75% of LiDAR, conservative
+#   th = 2.0  → keep ~90% of LiDAR  ← default sweet spot
+#   th = 3.0  → keep ~95% of LiDAR, looser
+
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_refined_grid
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+loss:
+  # Keep the per-pixel metric anchor at full strength on consistent
+  # LiDAR pixels — they carry essentially all the metric information
+  # we'd lose by dropping L1_lidar entirely.
+  w_lidar: 1.0
+  lam: 0.0
+  # Pure affine-invariant shape supervision on dense_gt (no change vs
+  # baseline shape_lidar).
+  w_shape_global: 1.0
+  w_shape_grid: 1.0
+  # LidarAnchored and affine-anchor disabled — the consistency mask
+  # handles the stripe problem directly at the L1 supervision point.
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  # The stripe-suppressing mask: drop LiDAR pixels where dense_gt and
+  # lidar disagree by more than this many meters. 2 m matches the q90
+  # of the residual distribution; the rows producing stripes have 5-6 m
+  # mismatches and are fully removed.
+  lidar_consistency_threshold: 2.0
+  shape_align_resolution: 32
+  shape_grid_K: 8
+  shape_grid_align_resolution: 16
+  shape_trunc: 1.0
+  shape_grid_min_inliers: 30
+
+wandb:
+  name: shape_lidar_consistency_th2
+  tags: [shape-loss, dav2-roe-grid, lidar-anchor, consistency-mask, moge-style]
+  notes: >
+    shape_lidar variant where the sparse-LiDAR L1 term skips the high
+    |dense−lidar| pixels (default 2 m). Diagnosed Spearman ρ ≈ 0.88
+    showed these exact pixels drive the stripe artifact. With them
+    masked out, the per-row hard L1 fit no longer conflicts with the
+    smooth dense_gt shape — stripes should vanish while ~90% of LiDAR
+    metric information is preserved (expected MAE delta ≈ 0.02 m).

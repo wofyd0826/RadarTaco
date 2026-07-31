@@ -1,0 +1,83 @@
+# @package _global_
+# Baseline shape_lidar (w_lidar=1, w_shape_global=1, w_shape_grid=1)
+# + AntiStripeLoss, targeting LiDAR-row neighborhoods.
+#
+# Rationale:
+#   Per-row Spearman ρ(|dense-lidar|, pred ∂y) ≈ 0.85 on baseline shape_lidar:
+#   stripes are sharp vertical jumps in pred at LiDAR rows where dense_gt
+#   and lidar disagree. They are unphysical — the underlying RGB has no
+#   matching edge.
+#
+#   Instead of weakening L1_lidar (consistency mask → MAE +33%) or
+#   trading dense supervision (LidarAnchored → learns dense's wrong
+#   values), this loss penalizes the *symptom* (|∂y pred| where RGB
+#   is flat) DIRECTLY in the LiDAR-row neighborhood, leaving every
+#   other supervision signal at baseline strength.
+#
+# Loss formula (real samples):
+#   w_y(p) = exp(-γ · |∂y rgb_gray(p)|)
+#   stripe_mask = vertical_dilate(lidar_mask, row_radius)
+#
+#   L = w_lidar         · L1(pred, lidar)                       ← unchanged
+#     + w_shape_global  · AffineInvariantL1(pred, dense_gt)     ← unchanged
+#     + w_shape_grid    · BlockGridAffineInvariantL1(...)       ← unchanged
+#     + w_anti_stripe   · mean_{stripe_mask}( |∂y pred| · w_y ) ← NEW
+#
+# Tuning:
+#   w_anti_stripe = 0.5 is a starting point; if stripes remain visible
+#   double it. anti_stripe_row_radius=4 (≈ ±4 pixels around each LiDAR
+#   row) covers nuScenes LiDAR row spacing at typical camera distances.
+
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_refined_grid
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+loss:
+  # Baseline shape_lidar weights — unchanged.
+  w_lidar: 1.0
+  lam: 0.0
+  w_shape_global: 1.0
+  w_shape_grid: 1.0
+  # Anti-stripe — directly suppresses ∂y jumps where RGB is flat,
+  # everywhere in the image. RGB-guided so real edges are NOT smoothed.
+  # Self-consistency on (pred, rgb) gradients only — does not depend on
+  # dense_gt values, so it applies in sky / ego / padding too (where
+  # stripes can still form when LiDAR reaches those rows).
+  #
+  # Magnitude calibration (whole-image, no valid_mask):
+  #   raw ≈ 0.35  ⇒ w_anti_stripe=1.0 gives contribution ≈ 0.35,
+  #                 about 1.45× the shape-loss contribution (0.24×2).
+  w_anti_stripe: 1.0
+  anti_stripe_gamma: 10.0
+  anti_stripe_near_lidar_only: false   # whole image, see comment above
+  # raw meters (NOT normalized by mean depth) so the loss magnitude is
+  # comparable to L1_lidar / shape_loss.
+  anti_stripe_normalize_by_mean: false
+  # All other anchor / consistency mechanisms disabled.
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  shape_align_resolution: 32
+  shape_grid_K: 8
+  shape_grid_align_resolution: 16
+  shape_trunc: 1.0
+  shape_grid_min_inliers: 30
+
+wandb:
+  name: shape_lidar_anti_stripe
+  tags: [shape-loss, dav2-roe-grid, anti-stripe, moge-style]
+  notes: >
+    Baseline shape_lidar (w_lidar=1, shape_global=1, shape_grid=1) plus
+    AntiStripeLoss: RGB-guided |∂y pred| penalty inside the vertical
+    dilation of LiDAR pixels (radius 4). Targets the stripe symptom
+    directly — RGB edges are exempt by exp(-γ|∂y rgb|) — without
+    weakening L1_lidar or shape supervision. Expected: stripes suppressed
+    while 0-80m MAE stays at baseline (~1.74).

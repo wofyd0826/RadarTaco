@@ -1,0 +1,41 @@
+# @package _global_
+# MoGe-2-style decomposition:
+#   - shape (per-pixel structure) ← refined dense GT, affine-invariant L1
+#   - metric scale                 ← sparse LiDAR L1 (paper Eq.5 first term)
+#
+# Loss formula (real samples only; sim samples use their existing routing):
+#   L = w_lidar · L1(pred, depth_lidar)                            ← metric
+#     + lam · L1(pred, depth_dense)                                ← metric dense (off here)
+#     + w_shape_global · AffineInvariantL1(pred, depth_dense)      ← global shape (ROE)
+#     + w_shape_grid   · AffineInvariantBlockGridL1(pred, depth_dense, K=8)  ← local shape
+#     [+ w_smooth · EdgeAwareSmoothness(pred, rgb)]
+#
+# The dense GT is `depth_refined_grid` by default (DA-v2 + per-cell ROE).
+# Override `dataset.dense_gt_dir=depth_refined` or `depth_acc` to compare.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_refined_grid
+
+loss:
+  w_lidar: 1.0            # metric anchor from sparse LiDAR
+  lam: 0.0                # drop the standard dense L1 — shape losses replace it
+  w_shape_global: 1.0     # MoGe-2's affine_invariant_global_loss equivalent
+  w_shape_grid: 1.0       # local block-grid affine-invariant (K=8)
+  shape_align_resolution: 32
+  shape_grid_K: 8
+  shape_grid_align_resolution: 16
+  shape_trunc: 1.0
+  shape_grid_min_inliers: 30
+
+wandb:
+  name: shape_lidar
+  tags: [shape-loss, dav2-roe-grid, lidar-anchor, moge-style]
+  notes: >
+    Shape (affine-invariant L1, global + K=8 block grid) from refined
+    dense GT; metric anchor (L1) from sparse LiDAR. ROE truncated-L1
+    aligner with trunc=1.0 matches MoGe-2 training default.

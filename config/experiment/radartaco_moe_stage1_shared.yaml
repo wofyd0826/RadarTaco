@@ -1,0 +1,56 @@
+# @package _global_
+# Stage-1 (teacher-forcing) — SHARED-expert variant.
+#
+# Same as `radartaco_moe_stage1.yaml` but keeps a shared expert on top of
+# the 3 non-shared depth experts. In stage 1 (one-hot gate) the shared
+# expert is always active; a token's fused output is
+#     fused = expert_GT(feat) + delta_shared              (residual applied once)
+#           = feat + delta_expert + delta_shared
+#
+# vs no-shared version:
+#     fused = expert_GT(feat) = feat + delta_expert
+#
+# The shared expert adds an "always-on" refinement that the model can
+# reuse across bins — a safety net that could help far/mid experts (which
+# see less varied data) but adds ~3.8M parameters and 2× active compute
+# per token at the bottleneck.
+defaults:
+  - override /model: radartaco_moe
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 1
+  moe_use_shared: true    # ← key difference from radartaco_moe_stage1.yaml
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 10.0
+
+training:
+  epochs: 30
+
+wandb:
+  name: radartaco_moe_stage1_shared
+  tags: [moe, stage1, teacher-forcing, depth-specialist, shared-expert]
+  notes: >
+    Depth-specialised MoE bottleneck WITH shared expert (1 shared +
+    3 non-shared experts). Stage 1 teacher-forced by per-token GT bin
+    (majority-vote over F_4/F_5 receptive fields).

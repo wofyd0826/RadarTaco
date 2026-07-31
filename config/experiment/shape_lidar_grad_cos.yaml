@@ -1,0 +1,74 @@
+# @package _global_
+# Replaces AffineInvariantL1 + raw-gradient shape with COSINE direction
+# supervision on the (∂x, ∂y) gradient vector. Same intent as
+# shape_lidar_grad_sign (learn DAv2 ordering, ignore its noisy
+# absolute ratios) but with two improvements:
+#
+#   1. Joint (∂x, ∂y) direction — not just per-axis sign. Captures
+#      gradient ANGLE, so (1, 5) vs (5, 1) (both positive but different
+#      slope) are distinguishable.
+#   2. Natural raw magnitude ([0, 2] · |g_target|) — no need for
+#      weights in the thousands like the hinge sign loss.
+#
+# Loss formula (real samples, per scale):
+#   cos = (g_pred · g_target) / (|g_pred| · |g_target|)
+#   L   = mean( |g_target| · (1 - cos) )
+#
+#   • |g_target| weight: flat regions auto-down-weight to 0 (same
+#     self-suppression as grad_sign).
+#   • Pred MAGNITUDE is unconstrained → DAv2's wrong absolute ratios
+#     are NOT learned, only its trustworthy direction.
+#   • Log-domain → invariant to per-image metric scale → no fight with
+#     L1_lidar over absolute depth at any weight.
+#
+#   L_total = w_lidar · L1_lidar  +  w_grad_cos · L_cos
+#
+# Multi-scale (1/1, 1/2, 1/4, 1/8): fine scale (1/1) carries neighbor
+# direction (= DAv2's edge/boundary detail in vector form), coarse
+# scales carry large-region direction.
+#
+# Magnitude calibration (one nuScenes train batch):
+#   init/early raw ≈ 0.05  |  mid raw ≈ 0.03  |  near-converged ≈ 0.03
+#   WRONG (heavy mismatch) raw ≈ 0.07
+#   ⇒ w_grad_cos=30 gives mid contribution ≈ 0.9, ~1.9× baseline shape
+#     supervision pressure (= w_shape_global=1 + w_shape_grid=1 → 0.48).
+
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_refined_grid
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+loss:
+  # Full-strength metric anchor — cosine loss is scale-invariant, no conflict.
+  w_lidar: 1.0
+  lam: 0.0
+  # Gradient-COSINE supervision (direction of (∂x, ∂y) vector).
+  w_grad_cos: 1000.0
+  grad_cos_scales: 4
+  grad_cos_use_log: true
+  # Other shape mechanisms off.
+  w_grad_sign: 0.0
+  w_grad_shape: 0.0
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+
+wandb:
+  name: shape_lidar_grad_cos
+  tags: [shape-loss, dav2-roe-grid, grad-cos, direction-only]
+  notes: >
+    Cosine direction supervision on the (∂x, ∂y) gradient vector vs
+    dense_gt. Same DAv2-ratio-free motivation as grad_sign but joint
+    vector direction (richer than per-axis sign) with natural raw
+    magnitude (no need for huge weights). Log-domain → scale-invariant;
+    L1_lidar runs at full strength (w_lidar=1) without conflict.

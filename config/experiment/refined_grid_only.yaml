@@ -1,0 +1,33 @@
+# @package _global_
+# Train RadarTaco using ONLY the DA-v2 + MoGe-ROE grid-refined dense GT.
+# - Sparse LiDAR L1 term is disabled (w_lidar=0).
+# - Dense GT directory is switched from `depth_acc` to `depth_refined_grid`
+#   (per-cell ROE-aligned depth from Depth-Anything-V2 ViT-L, K=8).
+#
+# The refined GT is already ROE-aligned to LiDAR per image, so it carries
+# the metric scale that the sparse-LiDAR term used to provide. The model
+# therefore learns dense per-pixel shape AND metric from one source.
+#
+# Caveat: lower bound of LiDAR-MAE is the refined GT's own LiDAR-MAE
+# (~2.0 m at 0-80m on train/val/test). Useful as ablation for the
+# stripe-artifact hypothesis (no sparse LiDAR L1 → no per-beam noise pull).
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_refined_grid
+
+loss:
+  w_lidar: 0.0
+  lam: 1.0          # dense (refined_grid) is the only depth-loss source
+
+wandb:
+  name: refined_grid_only
+  tags: [baseline, gnn, refined-gt, dav2-roe-grid, no-lidar-l1]
+  notes: >
+    Dense GT = DA-v2 + MoGe-2 ROE per-cell (K=8) refinement,
+    saved at /data/public/nuScenes/derived/depth_refined_grid.
+    Sparse LiDAR L1 disabled (w_lidar=0). Single supervision source.

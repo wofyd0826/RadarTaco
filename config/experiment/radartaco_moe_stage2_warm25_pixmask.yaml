@@ -1,0 +1,54 @@
+# @package _global_
+# Stage-2 (self-routing) — continues from stage-1 warm25 PIXMASK checkpoint.
+#
+# NOTE: pixmask is a stage-1-only concept (needs GT routing to define
+# which pixels a given expert supervises). In stage 2 the router
+# self-routes; masking by GT-vs-router-decision would either hide router
+# mistakes (mask=router decision) or be a teacher-forcing anti-pattern
+# (mask=GT). Loss is therefore standard task loss here — same as
+# radartaco_moe_stage2_warm25.yaml but loading the pixmask stage-1 ckpt.
+#
+# Known issue: with moe_top_k=1 and w_router=0, router receives no
+# gradient in stage 2 (gate = probs/probs = 1 → 0). Router is effectively
+# frozen at stage-1 end state. See verify pipeline output for details.
+defaults:
+  - override /model: radartaco_moe
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 2
+  moe_use_shared: false
+  moe_top_k: 1
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 0.0
+
+training:
+  epochs: 10
+  load_weights_from: output/radartaco_moe_stage1_warm25_pixmask/best.pt
+
+wandb:
+  name: radartaco_moe_stage2_warm25_pixmask
+  tags: [moe, stage2, self-routing, warm-start-baseline25, no-shared, pixel-mask-pipeline]
+  notes: >
+    Stage-2 MoE self-routing, warm-started from pixmask stage-1 best.pt.
+    10 epochs, top-1 per token, pure task loss (no pixmask).

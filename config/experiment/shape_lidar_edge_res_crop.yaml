@@ -1,0 +1,37 @@
+# @package _global_
+# shape_lidar_edge_res + random-crop training-time augmentation.
+# Everything identical to shape_lidar_edge_res.yaml EXCEPT
+# `dataset.train_crop_hw: [640, 1408]` — each train sample is randomly
+# cropped to 640×1408 from the original 900×1600 (val / test unchanged).
+#
+# Random crop provides implicit positional / scale augmentation and
+# reduces per-step compute (~55% of original pixels), enabling larger
+# effective batch throughput.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  train_crop_hw: [640, 1408]      # random-crop each train sample
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_shape_global: 1.0
+  w_shape_grid: 1.0
+  shape_align_resolution: 32
+  shape_grid_K: 8
+  shape_grid_align_resolution: 16
+  shape_trunc: 1.0
+  shape_grid_min_inliers: 30
+
+wandb:
+  name: shape_lidar_edge_res_crop
+  tags: [shape-loss, dense-gt-edge-res, lidar-anchor, moge-style, random-crop]
+  notes: >
+    shape_lidar_edge_res with random-crop augmentation (640×1408 from
+    900×1600). Everything else identical — measures the effect of
+    train-time random cropping on the LiDAR-anchored dense GT variant.

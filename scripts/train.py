@@ -67,6 +67,14 @@ def _build_model(cfg, max_depth: float, max_radar_points: int):
         multi_scale=bool(cfg.model.get("multi_scale", False)),
         multi_scale_levels=tuple(cfg.model.get("multi_scale_levels", (2, 4, 8, 16))),
         use_aux_branch=bool(cfg.model.get("use_aux_branch", False)),
+        moe_at_l=tuple(cfg.model.get("moe_at_l") or ()),
+        moe_n_experts=int(cfg.model.get("moe_n_experts", 3)),
+        moe_use_shared=bool(cfg.model.get("moe_use_shared", True)),
+        moe_top_k=(int(cfg.model.get("moe_top_k"))
+                   if cfg.model.get("moe_top_k") is not None else None),
+        moe_stage=int(cfg.model.get("moe_stage", 2)),
+        moe_bins=tuple(cfg.model.get("moe_bins", (0.0, 20.0, 50.0, 100.0))),
+        moe_router_arch=str(cfg.model.get("moe_router_arch", "conv1x1")),
     )
 from src.util.loaders import build_loaders, build_viz_sampler                # noqa: E402
 from src.util.seeds import set_seed                                          # noqa: E402
@@ -132,6 +140,41 @@ def main(cfg: DictConfig) -> None:
         trainer.load_checkpoint(cfg.training.load_weights_from, weights_only=True)
     if cfg.training.get("resume_from"):
         trainer.load_checkpoint(cfg.training.resume_from, weights_only=False)
+
+    # Optional module freezing (fusion-only specialist experiments).
+    # `training.freeze_modules` is a list of top-level attribute names on the
+    # model to freeze (requires_grad=False + eval mode). Optimizer is rebuilt
+    # over the remaining trainable params only.
+    freeze_list = cfg.training.get("freeze_modules") or []
+    if freeze_list:
+        import types
+        # Override .train() to be a no-op that keeps the module in eval mode.
+        # Needed because trainer calls model.train() each epoch, which would
+        # otherwise re-enable BatchNorm running-stat updates on frozen submodules.
+        def _keep_eval(self, mode: bool = True):
+            return torch.nn.Module.train(self, False)
+        n_frozen = 0
+        for mod_name in freeze_list:
+            # Dotted paths supported (e.g., "radar_fusion.node_blocks.0").
+            try:
+                mod = model.get_submodule(mod_name)
+            except AttributeError:
+                logger.warning(f"freeze_modules: '{mod_name}' not found on model, skipping.")
+                continue
+            for p in mod.parameters():
+                p.requires_grad = False
+                n_frozen += p.numel()
+            mod.eval()
+            mod.train = types.MethodType(_keep_eval, mod)
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        n_train = sum(p.numel() for p in trainable)
+        logger.info(f"Froze {'+'.join(freeze_list)}: {n_frozen/1e6:.2f}M frozen, "
+                    f"{n_train/1e6:.2f}M trainable")
+        trainer.optimizer = torch.optim.Adam(
+            trainable,
+            lr=float(cfg.training.lr),
+            weight_decay=float(cfg.training.get("weight_decay", 0.0)),
+        )
 
     try:
         trainer.train()

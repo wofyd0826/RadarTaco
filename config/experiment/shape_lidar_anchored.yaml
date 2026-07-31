@@ -1,0 +1,69 @@
+# @package _global_
+# LiDAR-anchored shape loss variant of shape_lidar.
+#
+# Idea: the standard `AffineInvariantL1` solves the affine (a, b) on
+# (pred, dense_gt). With sparse-LiDAR L1 also active, the two terms
+# disagree at LiDAR pixels where dense_gt ≠ lidar (we measured Spearman
+# ρ ≈ 0.88 between per-row |dense-lidar| and per-row pred vertical
+# jump). The disagreement is what produces the horizontal stripes.
+#
+# LidarAnchoredGlobalShape / BlockGrid solve (a, b) on (pred, lidar)
+# instead, so the affine inherently respects LiDAR's metric. The L1
+# residual is still taken against dense_gt for shape supervision. The
+# auxiliary `w_affine_anchor` pulls (a, b) toward identity, giving the
+# model a soft metric tie to dense_gt too — which lets us reduce the
+# hard per-pixel L1_lidar weight without losing metric accuracy.
+#
+# Loss formula (real samples):
+#   L = w_lidar              · L1(pred, lidar)                             ← weak metric anchor
+#     + w_anchored_global    · LidarAnchoredGlobalShape(pred, dense, lidar)
+#     + w_anchored_grid      · LidarAnchoredBlockGridShape(pred, dense, lidar, K=8)
+#     + w_affine_anchor      · mean((a-1)² + b²) over fitted affines
+#
+# Defaults below: small L1_lidar (0.1) for metric stability + full
+# anchored shape (global + grid) + moderate affine anchor (0.5).
+# Override via run_shape_lidar.sh or Hydra CLI.
+
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_refined_grid
+  lidar_gt_dir: depth_lidar              # train uses raw single-frame LiDAR
+                                          # (no filled-GT needed here — the
+                                          # anchored shape handles the
+                                          # mismatch on its own)
+  val_lidar_gt_dir: depth_lidar          # val/eval canonical anchor
+
+loss:
+  # Standard sparse-LiDAR L1 — keep small so it doesn't dominate.
+  w_lidar: 0.1
+  lam: 0.0
+  # Standard affine-invariant shape losses OFF (we use the anchored
+  # variants below instead).
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  # LiDAR-anchored shape (global + K=8 block grid).
+  w_anchored_global: 1.0
+  w_anchored_grid: 1.0
+  # Pull (a, b) toward (1, 0) — adds a soft metric tie to dense_gt so
+  # the model can't escape to an arbitrary scale via the affine.
+  w_affine_anchor: 0.5
+  shape_align_resolution: 32
+  shape_grid_K: 8
+  shape_grid_align_resolution: 16
+  shape_trunc: 1.0
+  shape_grid_min_inliers: 30
+
+wandb:
+  name: shape_lidar_anchored
+  tags: [shape-loss, dav2-roe-grid, lidar-anchor, anchored-affine, moge-style]
+  notes: >
+    LidarAnchoredGlobalShape + LidarAnchoredBlockGridShape with affine
+    anchor penalty. (a, b) is locked to LiDAR's metric via the ROE
+    solve at LiDAR pixels; (a-1)² + b² regulariser pulls it toward
+    identity (= dense_gt metric). w_lidar lowered to 0.1 so the
+    per-pixel hard L1 fit (the stripe driver) is much weaker.

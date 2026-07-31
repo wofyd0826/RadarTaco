@@ -1,0 +1,37 @@
+# @package _global_
+# Specialisation ablation: shape_lidar_grad_shape_edge_res trained ONLY on
+# day_rain samples (train=5,060 / val=968).
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+  split_train: /data/public/nuScenes/derived/splits/train_day_rain.txt
+  split_val:   /data/public/nuScenes/derived/splits/val_day_rain.txt
+  split_test:  /data/public/nuScenes/derived/splits/test_day_rain.txt
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+
+wandb:
+  name: specialist_day_rain
+  tags: [specialization, day-rain, shape-loss, dense-gt-edge-res, grad-shape]
+  notes: >
+    shape_lidar_grad_shape_edge_res trained on day_rain samples only
+    (~5k train).

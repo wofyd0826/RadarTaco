@@ -1,0 +1,38 @@
+# @package _global_
+# shape_lidar_edge_res + scale-jitter augmentation
+#   Each train sample is randomly cropped to `train_crop_hw` then
+#   resized back to the original (H, W). Output shape unchanged, but
+#   train-time zoom / centre randomised.
+#
+# Loss / model / dense GT: same as shape_lidar_edge_res.yaml.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  # 720×1280 = 900×1600 × 0.8 — same 9:16 aspect ratio as the original,
+  # so the resize back to 900×1600 preserves object proportions.
+  train_crop_hw: [720, 1280]
+  crop_resize_back: true          # resize back to 900×1600 after crop
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_shape_global: 1.0
+  w_shape_grid: 1.0
+  shape_align_resolution: 32
+  shape_grid_K: 8
+  shape_grid_align_resolution: 16
+  shape_trunc: 1.0
+  shape_grid_min_inliers: 30
+
+wandb:
+  name: shape_lidar_edge_res_scalejitter
+  tags: [shape-loss, dense-gt-edge-res, lidar-anchor, moge-style, scale-jitter]
+  notes: >
+    shape_lidar_edge_res + scale-jitter: crop to 720×1280 (same 9:16
+    aspect as original 900×1600) then resize back to 900×1600. Object
+    proportions preserved; only zoom / centre randomised.

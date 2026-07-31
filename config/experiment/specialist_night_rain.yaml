@@ -1,0 +1,40 @@
+# @package _global_
+# Specialisation ablation: shape_lidar_grad_shape_edge_res trained ONLY on
+# night_rain samples (train=522 / val=120). Extremely small — the
+# specialist may underfit; that is itself an informative signal for MoE
+# design (a tag this rare probably shouldn't get its own expert).
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+  split_train: /data/public/nuScenes/derived/splits/train_night_rain.txt
+  split_val:   /data/public/nuScenes/derived/splits/val_night_rain.txt
+  split_test:  /data/public/nuScenes/derived/splits/test_night_rain.txt
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+
+wandb:
+  name: specialist_night_rain
+  tags: [specialization, night-rain, shape-loss, dense-gt-edge-res, grad-shape]
+  notes: >
+    shape_lidar_grad_shape_edge_res trained on night_rain samples only
+    (~522 train). Tiny — expect underfitting; comparison is still
+    informative for MoE routing decisions.

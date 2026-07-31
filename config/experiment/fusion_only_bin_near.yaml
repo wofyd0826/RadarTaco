@@ -1,0 +1,63 @@
+# @package _global_
+# Fusion-only specialist — NEAR bin.
+#
+# Purpose: isolate the fusion module's specialization capacity. Encoder
+# (image + radar) and decoder are loaded from the baseline checkpoint and
+# frozen; only the PyramidRadarFusion updates. Loss restricted to
+# [0, 20) m pixels (same masking as `shape_edge_res_bin_near.yaml`).
+#
+# Compare against `shape_lidar_grad_shape_edge_res` (baseline) evaluated
+# on the same [0, 20) m range: if this specialist beats baseline in-bin,
+# the fusion module alone has enough specialization headroom for MoE to
+# recover an equivalent gain.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  depth_bin_min: 0.0
+  depth_bin_max: 20.0
+
+training:
+  epochs: 30
+  # Warm-start ALL modules from baseline (encoder+fusion+decoder), then
+  # freeze encoder/decoder so only radar_fusion trains.
+  load_weights_from: output/shape_lidar_grad_shape_edge_res/best.pt
+  # Match MoE's `moe_at_l=[2]` scope: train ONLY L2 fusion blocks.
+  # Freeze encoder, decoder, and L0/L1 fusion blocks.
+  freeze_modules:
+    - image_encoder
+    - radar_encoder
+    - depth_decoder
+    - radar_fusion.node_blocks.0
+    - radar_fusion.node_blocks.1
+    - radar_fusion.edge_blocks.0
+    - radar_fusion.edge_blocks.1
+
+wandb:
+  name: fusion_only_bin_near
+  tags: [fusion-only, depth-specialist, bin-near, edge-res]
+  notes: >
+    Fusion-only near specialist. Baseline warm-start; encoder + decoder
+    frozen; only PyramidRadarFusion (~L2 block dominant) trains under
+    loss masked to [0, 20) m. Reveals the fusion module's ceiling for
+    depth specialization in isolation from encoder/decoder capacity.

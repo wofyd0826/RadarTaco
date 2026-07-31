@@ -1,0 +1,51 @@
+# Depth-specialised MoE variant of RadarTaco.
+#
+# Only difference from `radartaco_gnn`: replaces the level-2 (bottleneck)
+# fusion blocks — `node_blocks[2]` (F_4, /32, 512ch) and
+# `edge_blocks[2]` (F_5, /64, 512ch) — with `MoEFusionBlock`s:
+#
+#   • 1 shared expert  — always active, provides baseline fusion.
+#   • 3 non-shared experts — near / mid / far, mixed by an image-only
+#     router (global-avg-pool → Linear → K logits → softmax).
+#
+# The bottleneck-only choice is grounded in our multi-scale routing
+# diagnostic (fine-scale routers collapsed to uniform; only the
+# bottleneck router learned meaningful specialisation) — see
+# tests/diagnose_per_scale_routing.py.
+#
+# Depth-specialist experiment (loss-mask on GT ∈ [0,20)/[20,50)/[50,100)m)
+# validated this bin choice — oracle upper bound: mae 1.373 vs baseline
+# 1.839 (−25.3%). See output/depth_oracle_combine/eval_*/metrics.json.
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 20
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+
+# ── MoE options ──
+moe_at_l: [2]              # only level 2 (bottleneck). All-scale = [0,1,2].
+moe_n_experts: 3           # near / mid / far → K=3 non-shared experts
+moe_use_shared: false      # No shared expert — pure MoE. Since Σ_k gate=1,
+                           # the residual is applied exactly once naturally,
+                           # matching baseline's `feat + delta` scale AND
+                           # matching the loss-mask specialist setup.
+moe_top_k: 1               # Stage 2: hard top-1 routing per token. Each
+                           # token goes through exactly ONE expert — same
+                           # semantics as Stage 1 teacher-forcing, just the
+                           # expert is now chosen by the router's argmax
+                           # instead of GT. Ignored in Stage 1 (gate=one_hot
+                           # is enforced by the teacher-forcing branch).
+# Two-stage training (DriveMoE §2.5):
+#   stage=1  teacher-forcing — router GT = argmax bin over dense-GT pixels
+#   stage=2  self-routing — router uses its own softmax
+# Stage 1 warms up specialists + router; stage 2 fine-tunes end-to-end.
+# Set via the experiment overlay (see config/experiment/radartaco_moe_*).
+moe_stage: 2
+moe_bins: [0.0, 20.0, 50.0, 100.0]     # bin edges → 3 non-shared experts

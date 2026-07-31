@@ -12,7 +12,7 @@ Each block runs a Radar-centered cross-attention transformer block:
 PyTorch's `scaled_dot_product_attention` dispatches to FlashAttention(2) /
 memory-efficient kernels when available (paper refs [7, 8]).
 """
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -125,6 +125,188 @@ class _FusionBlock(nn.Module):
         return feat
 
 
+class MoEFusionBlock(nn.Module):
+    """Depth-specialised MoE variant of `_FusionBlock` — PER-TOKEN routing.
+
+    Structure (DriveMoE analogue, adapted to depth's per-pixel nature):
+      • 1 shared expert — always active, provides baseline fusion at every
+        spatial position.
+      • K non-shared experts (default K=3, near/mid/far) — mixed per token
+        by a router that produces a spatial gate map (B, K, H, W).
+
+    Router (image-only, PER-TOKEN):
+      • Input: image feature at this scale, shape (B, C, H, W).
+      • Head: 1×1 Conv2d(C → K). Output: (B, K, H, W) logits, softmaxed
+        along K to produce a per-position gate.
+      • Rationale: depth is a per-pixel property (a single frame contains
+        near+mid+far pixels), so routing must also be per-pixel. Empirical
+        argmax-per-sample was severely imbalanced (91.8/8.1/0.1) — see
+        tests/check_moe_gt_routing.py; per-token GT restores balance to
+        the natural pixel distribution (~51/30/18).
+
+    Two-stage training (DriveMoE §2.5):
+      stage=1: teacher-forcing. `depth_gt_dense: (B, 1, H_full, W_full)`
+               is bucketized PER PIXEL by `self.bins`, then each token's
+               GT is the MAJORITY-VOTE bin over its receptive field
+               (~1000 pixels for F_4, ~3800 for F_5). This avoids the
+               averaging artifact where near+far bimodal tokens would
+               land in 'mid' — see tests/verify_per_token_routing.py.
+               Gate = one_hot(gt) per token; router logits are exposed
+               for CE supervision.
+      stage=2: self-routing. Gate = softmax(logits) along K, per token;
+               optional sparsification to top_k experts per token.
+
+    Output: gated non-shared mixture + shared-expert output (always added).
+    """
+
+    def __init__(
+        self,
+        ch: int,
+        kv_dim: int,
+        heads: int,
+        a_l: float,
+        mlp_ratio: float = 2.0,
+        n_experts: int = 3,
+        use_shared: bool = True,
+        top_k: Optional[int] = None,
+        bins: Tuple[float, ...] = (0.0, 20.0, 50.0, 100.0),
+        router_arch: str = "conv1x1",
+    ) -> None:
+        super().__init__()
+        self.n_experts = int(n_experts)
+        self.top_k = int(top_k) if top_k is not None else None
+        self.experts = nn.ModuleList([
+            _FusionBlock(ch, kv_dim, heads, a_l, mlp_ratio=mlp_ratio)
+            for _ in range(self.n_experts)
+        ])
+        self.shared = (_FusionBlock(ch, kv_dim, heads, a_l, mlp_ratio=mlp_ratio)
+                       if use_shared else None)
+        # Image-only PER-TOKEN router. Output shape (B, K, H, W).
+        # - "conv1x1"  : single 1×1 linear classifier (legacy, minimal).
+        # - "mlp3x3"   : 3×3 conv → GELU → 3×3 conv → GELU → 1×1 (Option C,
+        #                spatial context + non-linearity, ~1.5M params).
+        self.router_arch = router_arch
+        if router_arch == "conv1x1":
+            self.router = nn.Conv2d(ch, self.n_experts, kernel_size=1)
+        elif router_arch == "mlp3x3":
+            h1 = min(256, ch // 2)
+            h2 = h1 // 2
+            self.router = nn.Sequential(
+                nn.Conv2d(ch, h1, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(h1, h2, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(h2, self.n_experts, kernel_size=1),
+            )
+        else:
+            raise ValueError(f"Unknown router_arch: {router_arch!r}")
+        # Bin edges for teacher-forcing GT (len K+1 → K bins). Registered
+        # as a buffer so it moves with .to(device) automatically.
+        assert len(bins) == self.n_experts + 1, \
+            f"bins must have n_experts+1 edges (got {len(bins)}, need {self.n_experts + 1})"
+        self.register_buffer("bins", torch.tensor(bins, dtype=torch.float32))
+
+    def _depth_to_bin(self, d: torch.Tensor) -> torch.Tensor:
+        """(B, 1, H, W) metric depth → (B, H, W) int64 bin indices.
+
+        Partition per pixel into [bins[i], bins[i+1]) for i ∈ 0..K-1;
+        pixels ≥ bins[-1] (== max_depth) land in the last bin. Sky/invalid
+        cells that dense_gt fills with max_depth (100 m) fall into 'far'.
+        """
+        B, _, H, W = d.shape
+        K = self.n_experts
+        ds = d.squeeze(1)                               # (B, H, W)
+        gt = torch.zeros(B, H, W, dtype=torch.long, device=d.device)
+        for i in range(K):
+            lo = self.bins[i].item()
+            hi = self.bins[i + 1].item()
+            in_bin = (ds >= lo) & (ds < hi)
+            gt = torch.where(in_bin, gt.new_tensor(i, dtype=torch.long), gt)
+        gt = torch.where(ds >= self.bins[-1].item(),
+                         gt.new_tensor(K - 1, dtype=torch.long), gt)
+        return gt
+
+    def forward(
+        self,
+        feat: torch.Tensor,
+        kv: torch.Tensor,
+        radar_x_orig: torch.Tensor,
+        radar_mask: torch.Tensor,
+        image_w: int,
+        depth_gt_dense: Optional[torch.Tensor] = None,
+        teacher_force: bool = True,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Args:
+            depth_gt_dense: (B, 1, H_full, W_full) full-res dense depth GT.
+                            If given, `router_gt` is ALWAYS computed and
+                            returned (used by CE loss). Absent → no GT
+                            available, self-route only.
+            teacher_force:  Controls which distribution drives `gate`.
+                            True  → gate = one_hot(router_gt) (stage 1 teacher-forcing)
+                            False → gate = softmax(logits) [+top_k] (self-route)
+                            Note: router_gt is still returned when
+                            `depth_gt_dense` is present, regardless of this
+                            flag — enables CE-anchor training during
+                            stage-2 self-routing.
+        Returns:
+            fused          : (B, C, H, W)
+            router_logits  : (B, K, H, W) — per-token raw logits.
+            router_gt      : (B, H, W) int64 or None. Present whenever
+                             `depth_gt_dense` was supplied.
+        """
+        B, C, H, W = feat.shape
+        logits = self.router(feat)                              # (B, K, H, W)
+
+        router_gt: Optional[torch.Tensor] = None
+        if depth_gt_dense is not None:
+            with torch.no_grad():
+                # Per-token GT via MAJORITY VOTE of per-pixel bins over the
+                # token's receptive field. Always compute when GT available.
+                pix_bin = self._depth_to_bin(depth_gt_dense.float())
+                onehot = F.one_hot(pix_bin, num_classes=self.n_experts) \
+                          .permute(0, 3, 1, 2).float()
+                frac = F.adaptive_avg_pool2d(onehot, (H, W))
+                router_gt = frac.argmax(dim=1)
+
+        if teacher_force and router_gt is not None:
+            # Stage-1 teacher-forcing: gate is fixed to GT bin.
+            gate = F.one_hot(router_gt, num_classes=self.n_experts) \
+                    .permute(0, 3, 1, 2).to(logits.dtype)
+        else:
+            # Self-routing: gate from router's own softmax (+ optional top-k).
+            probs = F.softmax(logits, dim=1)
+            if self.top_k is not None and self.top_k < self.n_experts:
+                _, idx = probs.topk(self.top_k, dim=1)
+                keep = torch.zeros_like(probs).scatter_(1, idx, 1.0)
+                gate = probs * keep
+                gate = gate / gate.sum(dim=1, keepdim=True).clamp_min(1e-8)
+            else:
+                gate = probs
+
+        # Run every expert (K=3 is cheap enough). Per-token gate broadcasts
+        # over the channel dim. Each expert returns feat + delta_expert
+        # (residual applied inside _FusionBlock). Because Σ_k gate[k] = 1
+        # per token, the mixed non-shared side is naturally
+        #    Σ_k gate[k] · (feat + delta_k) = feat + Σ_k gate[k] · delta_k
+        # → residual is applied exactly once.
+        expert_outs = torch.stack([
+            e(feat, kv, radar_x_orig, radar_mask, image_w)
+            for e in self.experts
+        ], dim=1)                                                # (B, K, C, H, W)
+        mixed = (gate.unsqueeze(2) * expert_outs).sum(dim=1)     # feat + weighted_delta
+
+        if self.shared is not None:
+            # Shared expert also returns feat + delta_shared. Naively adding
+            # would double-count `feat` (2·feat + Σ deltas), breaking the
+            # magnitude the downstream decoder expects. Extract only the
+            # delta and add once.
+            shared_delta = (self.shared(feat, kv, radar_x_orig, radar_mask, image_w)
+                            - feat)
+            mixed = mixed + shared_delta
+        return mixed, logits, router_gt
+
+
 class PyramidRadarFusion(nn.Module):
     """Hierarchical fusion module across L=3 layers and 6 image scales."""
 
@@ -135,25 +317,44 @@ class PyramidRadarFusion(nn.Module):
         a_l: Tuple[float, float, float] = (48.0, 32.0, 16.0),
         max_radar_points: int = 128,
         heads: int = 4,
+        # MoE options — enable per-level. `moe_at_l` is an iterable of level
+        # indices (0..L-1) at which BOTH the node and edge fusion blocks
+        # are replaced by `MoEFusionBlock`. Empty → identical to baseline.
+        moe_at_l: Optional[Tuple[int, ...]] = None,
+        moe_n_experts: int = 3,
+        moe_use_shared: bool = True,
+        moe_top_k: Optional[int] = None,
+        moe_bins: Tuple[float, ...] = (0.0, 20.0, 50.0, 100.0),
+        moe_router_arch: str = "conv1x1",
     ) -> None:
         super().__init__()
         assert len(img_channels) == 2 * len(radar_channels), \
             f"img_channels must have 2L entries (got {len(img_channels)})"
         self.L = len(radar_channels)
-        # block A (N_l ↔ F_{2l-1}): kv_dim = C_l
-        self.node_blocks = nn.ModuleList([
-            _FusionBlock(ch=img_channels[2 * l],
-                         kv_dim=radar_channels[l],
-                         heads=heads, a_l=a_l[l])
-            for l in range(self.L)
-        ])
-        # block B (E_l ↔ F_{2l}): kv_dim = K_max
-        self.edge_blocks = nn.ModuleList([
-            _FusionBlock(ch=img_channels[2 * l + 1],
-                         kv_dim=max_radar_points,
-                         heads=heads, a_l=a_l[l])
-            for l in range(self.L)
-        ])
+        self.moe_at_l = set(moe_at_l or ())
+
+        def _mk_block(ch, kv_dim, a):
+            if _mk_block._current_l in self.moe_at_l:
+                return MoEFusionBlock(
+                    ch=ch, kv_dim=kv_dim, heads=heads, a_l=a,
+                    n_experts=moe_n_experts,
+                    use_shared=moe_use_shared,
+                    top_k=moe_top_k,
+                    bins=moe_bins,
+                    router_arch=moe_router_arch,
+                )
+            return _FusionBlock(ch=ch, kv_dim=kv_dim, heads=heads, a_l=a)
+
+        # `_mk_block` closes over `_current_l`; set it per level below.
+        _mk_block._current_l = 0
+        node_blocks = []
+        edge_blocks = []
+        for l in range(self.L):
+            _mk_block._current_l = l
+            node_blocks.append(_mk_block(img_channels[2 * l], radar_channels[l], a_l[l]))
+            edge_blocks.append(_mk_block(img_channels[2 * l + 1], max_radar_points, a_l[l]))
+        self.node_blocks = nn.ModuleList(node_blocks)
+        self.edge_blocks = nn.ModuleList(edge_blocks)
 
     def forward(
         self,
@@ -163,15 +364,54 @@ class PyramidRadarFusion(nn.Module):
         radar_points: torch.Tensor,
         radar_mask: torch.Tensor,
         image_w: int,
-    ) -> List[torch.Tensor]:
+        depth_gt_dense: Optional[torch.Tensor] = None,
+        teacher_force: bool = True,
+    ):
+        """Forward.
+
+        Args:
+            depth_gt_dense: full-res dense depth GT (B, 1, H_full, W_full).
+                If given, each MoE block returns per-token router_gt (for
+                CE loss). Pass None for eval / when GT unavailable.
+            teacher_force: bool. Controls MoE block's gate mode.
+                True  → gate = one_hot(router_gt) (stage-1 teacher-forcing)
+                False → gate = softmax(logits) [+top-k] (self-routing)
+                router_gt is still returned when depth_gt_dense present.
+
+        Returns:
+            fused (List[Tensor], len 2L): scale-wise fused features.
+            router_logits (List[Tensor]): one entry per MoE block (node
+                then edge, per MoE level, in order). Empty if no MoE.
+                Each entry is (B, K, H_block, W_block).
+            router_gts (List[Optional[Tensor]]): matching per-token GT
+                labels (B, H_block, W_block) int64, or None per block when
+                depth_gt_dense was not provided.
+        """
         # Channel 3 = x_pix (image-plane horizontal) for the radar-centered
         # attention's horizontal-window mask. The 3D camera coords (channels
         # 0..2) are already consumed upstream by the radar encoder.
         radar_x = radar_points[:, :, 3]
         out = list(feats)
+        router_logits: List[torch.Tensor] = []
+        router_gts: List[Optional[torch.Tensor]] = []
         for l in range(self.L):
             f_odd = feats[2 * l]
             f_even = feats[2 * l + 1]
-            out[2 * l] = self.node_blocks[l](f_odd, N_list[l], radar_x, radar_mask, image_w)
-            out[2 * l + 1] = self.edge_blocks[l](f_even, E_list[l], radar_x, radar_mask, image_w)
-        return out
+            nb, eb = self.node_blocks[l], self.edge_blocks[l]
+            if isinstance(nb, MoEFusionBlock):
+                x, log_n, gt_n = nb(f_odd, N_list[l], radar_x, radar_mask, image_w,
+                                    depth_gt_dense=depth_gt_dense,
+                                    teacher_force=teacher_force)
+                y, log_e, gt_e = eb(f_even, E_list[l], radar_x, radar_mask, image_w,
+                                    depth_gt_dense=depth_gt_dense,
+                                    teacher_force=teacher_force)
+                router_logits.append(log_n)
+                router_logits.append(log_e)
+                router_gts.append(gt_n)
+                router_gts.append(gt_e)
+            else:
+                x = nb(f_odd, N_list[l], radar_x, radar_mask, image_w)
+                y = eb(f_even, E_list[l], radar_x, radar_mask, image_w)
+            out[2 * l] = x
+            out[2 * l + 1] = y
+        return out, router_logits, router_gts

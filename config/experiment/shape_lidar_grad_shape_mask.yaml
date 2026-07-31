@@ -1,0 +1,76 @@
+# @package _global_
+# LiDAR-conditioned shape mask for grad_shape.
+#
+# Idea (option C1): the standard grad_shape loss supervises every
+# pixel of dense_gt — including pixels where DAv2 disagrees with
+# LiDAR (= unreliable). Here, supervision is gated to pixels within
+# `dilate` px of a LiDAR point that agrees with dense_gt within
+# `threshold` m. The model is supervised ONLY where dense_gt is
+# verifiably correct vs LiDAR — conflict-prone regions are silently
+# excluded from grad_shape.
+#
+# Loss formula (real samples):
+#   trusted = dilate( (|dense_gt − lidar| < τ) & valid_lidar, r )
+#   L = w_lidar · L1(pred, lidar)
+#     + w_grad_shape · sum_s |∂log pred − ∂log dense_gt| · trusted
+#
+# Compared to plain grad_shape, the supervised region shrinks but
+# every supervised pixel is LiDAR-confirmed. Compared to the
+# anchored-block alignment alternative, this is a much smaller
+# change (one mask op) and introduces no block boundary artefacts.
+#
+# Trade-off:
+#   • DAv2 wrong-ratio pixels: EXCLUDED (silently skipped).
+#   • Supervision area: SHRINKS — only LiDAR-confirmed regions get
+#     gradient supervision. Outside the dilation radius, only L1_lidar
+#     constrains the model. dilate=8 px gives reasonable spatial
+#     coverage on the nuScenes LiDAR pattern.
+#
+# Threshold τ=2 m matches the dense-vs-lidar diagnostic q90 (q90 ≈
+# 1.6 m) — keeps ~95 % of LiDAR-confirmed pixels.
+
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_refined_grid
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  # Same supervision strength as the working grad_shape run (w=100),
+  # just gated by the LiDAR-conditioned mask.
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  # Mask gating: trust pixels near LiDAR where dense_gt ≈ lidar.
+  grad_shape_consistency_threshold: 2.0   # meters; matches dense-vs-lidar q90
+  grad_shape_consistency_dilate: 8         # px radius around LiDAR points
+  # Aligned variant off (this run uses the mask approach, not block-ROE).
+  w_grad_shape_aligned: 0.0
+  # AffineInvariantL1 disabled.
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  # All other mechanisms off.
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+
+wandb:
+  name: shape_lidar_grad_shape_mask
+  tags: [shape-loss, dav2-roe-grid, grad-shape, lidar-conditioned-mask, trusted-region]
+  notes: >
+    LiDAR-conditioned mask on grad_shape supervision. Pixels are
+    supervised only where they sit within 8 px of a LiDAR point whose
+    depth matches dense_gt within 2 m. The mask is a soft AND of
+    LiDAR-verified dense_gt regions; unreliable DAv2 areas (mid-range
+    20-50 m on nuScenes) are simply removed from supervision.
+    Expected: same stripe suppression as grad_shape with reduced
+    mid-range metric loss, at the cost of narrower supervision area.

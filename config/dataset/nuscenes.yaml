@@ -29,6 +29,15 @@ photometric_aug:
 # 'depth_acc'    = paper-faithful 80+80 accumulated sparse GT (default, matches Eq.5).
 # 'depth_interp' = Delaunay-interp dense GT (alternative).
 dense_gt_dir: depth_acc
+# Sparse-LiDAR supervision target for the *training* loader. Default raw
+# single-frame projection. Set to `depth_lidar_filled` to use the
+# residual-fill variant (scripts/build_lidar_filled_gt.py) that propagates
+# each LiDAR point's (lidar - dense_gt) into its small neighborhood —
+# stripe-suppressing.
+lidar_gt_dir: depth_lidar
+# Validation/eval LiDAR source. Defaults to canonical depth_lidar so wandb
+# val metrics match standalone eval.py and are comparable across runs.
+val_lidar_gt_dir: depth_lidar
 radar_3d_dir:  radar_3d            # sidecar (N,3) ego (front,left,up) — see scripts/preprocess_radar_3d.py
 max_radar_points: 128
 max_depth: 100.0

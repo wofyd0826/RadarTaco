@@ -53,6 +53,7 @@ class RadarTacoTrainer:
         os.makedirs(cfg.training.output_dir, exist_ok=True)
         self.global_step = 0
         self.best_metric = float("inf")
+        self.start_epoch = 0
 
     # ---------------------------------------------------------- helpers --
     def _to_device(self, batch: Dict) -> Dict:
@@ -69,7 +70,7 @@ class RadarTacoTrainer:
 
     # ----------------------------------------------------------- train --
     def train(self) -> None:
-        for epoch in range(self.cfg.training.epochs):
+        for epoch in range(self.start_epoch, self.cfg.training.epochs):
             self._adjust_lr(epoch)
             self._train_one_epoch(epoch)
             metrics, agg = self.validate()
@@ -95,7 +96,8 @@ class RadarTacoTrainer:
                 pred = self.model(batch["rgb_norm"],
                                   batch["radar_points"],
                                   batch["radar_mask"],
-                                  batch.get("rel_depth"))
+                                  batch.get("rel_depth"),
+                                  depth_gt_dense=batch.get("depth_gt_dense"))
                 losses = self.loss_fn(pred, batch)
                 loss = losses["loss_total"]
             self.scaler.scale(loss).backward()
@@ -128,6 +130,8 @@ class RadarTacoTrainer:
                                   batch["radar_points"],
                                   batch["radar_mask"],
                                   batch.get("rel_depth"))
+            if isinstance(pred, dict):
+                pred = pred["depth"]
             B = pred.shape[0]
             for b in range(B):
                 pn = pred[b, 0].float().cpu().numpy()
@@ -156,7 +160,7 @@ class RadarTacoTrainer:
     def _build_viz_panel(self):
         """Build a small dict of {key: HxWx3 uint8} for wandb image logging."""
         from src.evaluation.viz import (build_grid, colorize_depth, colorize_error,
-                                        overlay_radar_points, rgb_to_uint8)
+                                        rgb_to_uint8)
         if not self.viz_sampler:
             return None
         self.model.eval()
@@ -167,15 +171,21 @@ class RadarTacoTrainer:
             with autocast(enabled=self.amp):
                 pred = self.model(batch["rgb_norm"], batch["radar_points"], batch["radar_mask"],
                                   batch.get("rel_depth"))
+            if isinstance(pred, dict):
+                pred = pred["depth"]
             rgb = rgb_to_uint8(batch["rgb_norm"][0].cpu().numpy())
-            radar_pts = batch["radar_points"][0].cpu().numpy()
-            radar_mask = batch["radar_mask"][0].cpu().numpy().astype(bool)
             gt = batch["depth_gt_lidar"][0, 0].cpu().numpy()
             valid = batch["valid_mask_lidar"][0, 0].cpu().numpy().astype(bool)
+            gt_dense = batch["depth_gt_dense"][0, 0].cpu().numpy()
+            valid_dense = batch["valid_mask_dense"][0, 0].cpu().numpy().astype(bool)
             pn = pred[0, 0].float().cpu().numpy()
             panel = build_grid([
                 rgb,
-                overlay_radar_points(rgb, radar_pts, radar_mask, vmax=self.cfg.dataset.max_depth),
+                # refined dense GT — show the WHOLE map (no valid_mask)
+                # so sky / ego / padding fill (=max_depth) is visible too,
+                # matching what the loss actually sees.
+                colorize_depth(gt_dense,
+                               vmax=self.cfg.dataset.max_depth),
                 colorize_depth(pn, vmax=self.cfg.dataset.max_depth),
                 colorize_error(pn, gt, valid, vmax=10.0, point_radius=3),
                 colorize_depth(gt, valid_mask=valid, vmax=self.cfg.dataset.max_depth, point_radius=3),
@@ -216,4 +226,8 @@ class RadarTacoTrainer:
             self.optimizer.load_state_dict(ckpt["optimizer"])
         if not weights_only:
             self.global_step = ckpt.get("global_step", 0)
-        logger.info(f"loaded checkpoint from {path} (weights_only={weights_only})")
+            # Resume from the *next* epoch — `epoch` in the ckpt is the
+            # last completed one (saved after _train_one_epoch + validate).
+            self.start_epoch = int(ckpt.get("epoch", -1)) + 1
+        logger.info(f"loaded checkpoint from {path} "
+                    f"(weights_only={weights_only}, start_epoch={self.start_epoch})")

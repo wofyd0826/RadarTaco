@@ -1,0 +1,70 @@
+# @package _global_
+# Robust variant of shape_lidar_grad_shape — adds soft truncation (MoGe
+# ROE-style) to the per-pixel residuals.
+#
+# Motivation:
+#   shape_lidar_grad_shape (w=100) recovers stripe artefacts well but
+#   loses metric accuracy in the mid-range (20–50 m): +0.4–0.8 m vs
+#   baseline. Direct cause is DAv2 (depth_refined_grid) producing
+#   inaccurate ABSOLUTE RATIOS where LiDAR becomes sparse — exactly the
+#   pixels where |∂log pred − ∂log target| is largest.
+#
+#   Soft truncation caps each pixel's contribution at `trunc`:
+#       res_x = min(|∂_x log pred − ∂_x log target|, trunc)
+#       res_y = min(|∂_y log pred − ∂_y log target|, trunc)
+#       L = sum_s w_s · (mean(res_x) + mean(res_y))
+#
+#   Pixels where pred and dense_gt agree closely (residual < trunc)
+#   contribute exactly as before — fine detail / stripe-suppression
+#   behaviour preserved. Pixels where DAv2's ratio is far from pred
+#   (residual >> trunc) — likely DAv2 outliers — see their gradient
+#   capped at trunc, so they can no longer dominate the optimisation.
+#
+# trunc interpretation (log-domain):
+#   trunc=0.5 → only ratio differences up to e^0.5 ≈ 1.65× learned
+#   trunc=1.0 → up to e^1.0 ≈ 2.72×  (MoGe default)
+#   trunc=1.5 → up to e^1.5 ≈ 4.48×
+#
+# Starting point trunc=1.0 (MoGe ROE consistency). If detail loss is
+# visible, try 1.5; if metric is still off, try 0.5.
+
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_refined_grid
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  # Same shape supervision as shape_lidar_grad_shape — only the residual
+  # truncation differs.
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  grad_shape_trunc: 1.0          # ← the only structural change vs grad_shape
+  # AffineInvariantL1 disabled.
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  # All other mechanisms off.
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+
+wandb:
+  name: shape_lidar_grad_shape_trunc
+  tags: [shape-loss, dav2-roe-grid, grad-shape, log-depth, moge-style, trimmed, robust]
+  notes: >
+    Robust variant of shape_lidar_grad_shape. Per-pixel log-grad residuals
+    are clamped to trunc=1.0 (MoGe ROE default) BEFORE averaging — caps
+    the supervision contribution of pixels where dense_gt and pred
+    disagree by more than ratio e (~2.72×), which are exactly the pixels
+    where DAv2's absolute ratio is least reliable. Expected: same
+    stripe suppression as grad_shape, with reduced mid-range MAE loss.

@@ -36,21 +36,31 @@ def _build_nuscenes_loaders(cfg) -> Tuple[DataLoader, DataLoader]:
 
     rel_depth_dir = ds_cfg.get("rel_depth_dir", None)
     rel_drop = float(ds_cfg.get("rel_depth_dropout_prob", 0.0))
+    # Train uses the experiment's lidar GT (possibly depth_lidar_filled),
+    # but validation always reads the canonical single-frame depth_lidar so
+    # the per-epoch wandb val metrics line up with the standalone eval.py
+    # numbers and stay comparable across experiments. Override the val
+    # source explicitly via `dataset.val_lidar_gt_dir` if needed.
+    train_lidar_gt_dir = ds_cfg.get("lidar_gt_dir", "depth_lidar")
+    val_lidar_gt_dir = ds_cfg.get("val_lidar_gt_dir", "depth_lidar")
     train_ds = NuScenesRadarDepthDataset(
         data_root=ds_cfg.data_root,
         split_file=ds_cfg.split_train,
         dense_gt_dir=ds_cfg.get("dense_gt_dir", "depth_acc"),
+        lidar_gt_dir=train_lidar_gt_dir,
         radar_3d_dir=ds_cfg.get("radar_3d_dir", "radar_3d"),
         night_ids_file=night_ids_file,
         rel_depth_dir=rel_depth_dir,
         rel_depth_dropout_prob=rel_drop,
         resize_to_hw=train_resize, crop_to_hw=train_crop,
+        crop_resize_back=bool(ds_cfg.get("crop_resize_back", False)),
         augmentation=True, photometric_aug=photometric_aug, **common,
     )
     val_ds = NuScenesRadarDepthDataset(
         data_root=ds_cfg.data_root,
         split_file=ds_cfg.split_val,
         dense_gt_dir=ds_cfg.get("dense_gt_dir", "depth_acc"),
+        lidar_gt_dir=val_lidar_gt_dir,
         radar_3d_dir=ds_cfg.get("radar_3d_dir", "radar_3d"),
         night_ids_file=night_ids_file,
         rel_depth_dir=rel_depth_dir,
@@ -367,6 +377,7 @@ def _build_mixed_batch_loader(cfg, sim_loaders_unused, val_loader, val_loaders_e
         data_root=ds_cfg.data_root,
         split_file=ds_cfg.split_train,
         dense_gt_dir=ds_cfg.get("dense_gt_dir", "depth_acc"),
+        lidar_gt_dir=ds_cfg.get("lidar_gt_dir", "depth_lidar"),
         radar_3d_dir=ds_cfg.get("radar_3d_dir", "radar_3d"),
         night_ids_file=ds_cfg.get("night_ids_file", None),
         rel_depth_dir=rel_depth_dir,
