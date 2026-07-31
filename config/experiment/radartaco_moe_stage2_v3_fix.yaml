@@ -1,0 +1,57 @@
+# @package _global_
+# MoE v3 stage-2 (self-routing) re-run on the fixed radar path.
+#
+# Identical to `radartaco_moe_stage2_v3.yaml` except the warm start, which
+# MUST come from the matching stage-1 fix run. `load_checkpoint(...,
+# weights_only=True)` uses strict=False, so pointing this at the OLD
+# output/radartaco_moe_stage1_v3/best.pt would load silently while dropping
+# every parameter the fixes introduced (norm_kv.{weight,bias}, k_null, v_null
+# — 40 tensors), leaving them at random init with no warning.
+#
+# Run order:
+#   1. python scripts/train.py +experiment=radartaco_moe_stage1_v3_fix
+#   2. python scripts/train.py +experiment=radartaco_moe_stage2_v3_fix
+# If step 1's output landed in a suffixed directory (the trainer appends _2,
+# _3 when the name already exists), update `load_weights_from` accordingly.
+defaults:
+  - override /model: radartaco_moe_v3
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 2
+  moe_use_shared: false
+  moe_top_k: 1
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 5.0                # CE anchor; top_k=1 blocks task-loss gradient
+
+training:
+  epochs: 20
+  load_weights_from: output/radartaco_moe_stage1_v3_fix/best.pt
+
+wandb:
+  name: radartaco_moe_stage2_v3_fix
+  tags: [moe, stage2, self-routing, no-shared, router-mlp3x3, ce-anchor, radar-path-fix]
+  notes: >
+    Stage-2 MoE v3 on the fixed radar path, with per-token expert dispatch.
+    20 epoch self-routing warm-started from radartaco_moe_stage1_v3_fix.
+    Baseline: radartaco_moe_stage2_v3.
