@@ -49,11 +49,26 @@ class RadarTacoTrainer:
             weight_decay=float(cfg.training.get("weight_decay", 0.0)),
         )
         self.amp = bool(cfg.training.amp)
-        self.scaler = GradScaler(enabled=self.amp)
+        # fp16 needs a loss scaler and this loss overflows it often: with
+        # w_grad_shape=100 the pre-clip grad norm sits around 10-40, the scaler
+        # halves on every overflow and only doubles after 2000 clean steps, so
+        # it can spiral down until 1/scale is inf and the gradients turn NaN.
+        # bf16 carries fp32's exponent range, so no scaling is involved.
+        self.amp_dtype = torch.bfloat16 if (
+            self.amp and str(cfg.training.get("amp_dtype", "float16")) == "bfloat16"
+        ) else torch.float16
+        use_scaler = self.amp and self.amp_dtype is torch.float16
+        self.scaler = GradScaler(enabled=use_scaler)
+        # Scale this low means the scaler is losing ground rather than settling.
+        self._min_scale = float(cfg.training.get("min_grad_scale", 1.0))
         os.makedirs(cfg.training.output_dir, exist_ok=True)
         self.global_step = 0
         self.best_metric = float("inf")
         self.start_epoch = 0
+        # Consecutive non-finite training losses tolerated before giving up.
+        self._nonfinite_steps = 0
+        self._nonfinite_patience = int(
+            cfg.training.get("nonfinite_patience", 25))
 
     # ---------------------------------------------------------- helpers --
     def _to_device(self, batch: Dict) -> Dict:
@@ -92,7 +107,7 @@ class RadarTacoTrainer:
         for it, batch in enumerate(self.train_loader):
             batch = self._to_device(batch)
             self.optimizer.zero_grad(set_to_none=True)
-            with autocast(enabled=self.amp):
+            with autocast(enabled=self.amp, dtype=self.amp_dtype):
                 pred = self.model(batch["rgb_norm"],
                                   batch["radar_points"],
                                   batch["radar_mask"],
@@ -100,11 +115,40 @@ class RadarTacoTrainer:
                                   depth_gt_dense=batch.get("depth_gt_dense"))
                 losses = self.loss_fn(pred, batch)
                 loss = losses["loss_total"]
+            # A non-finite loss poisons BatchNorm running stats on the spot
+            # (they update in the forward, whatever the optimizer does), so the
+            # run never recovers. Skip the step, and abort once it is clearly
+            # not a one-off — otherwise training burns epochs on NaN, which is
+            # exactly what happened to shape_lidar_grad_shape_edge_res_fix
+            # (diverged at step 8284, ran ~48k more steps producing nothing).
+            if not torch.isfinite(loss):
+                self._nonfinite_steps += 1
+                logger.warning(
+                    f"ep {epoch} it {it+1}: non-finite loss ({float(loss)}) — "
+                    f"skipping step ({self._nonfinite_steps}/{self._nonfinite_patience})"
+                )
+                if self._nonfinite_steps >= self._nonfinite_patience:
+                    raise RuntimeError(
+                        f"training diverged: {self._nonfinite_steps} non-finite "
+                        f"losses in a row at ep {epoch} it {it+1}. Last finite "
+                        f"checkpoint is in {self.cfg.training.output_dir}."
+                    )
+                self.optimizer.zero_grad(set_to_none=True)
+                continue
+            self._nonfinite_steps = 0
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             self.scaler.step(self.optimizer)
             self.scaler.update()
+            if self.scaler.is_enabled() and self.scaler.get_scale() < self._min_scale:
+                raise RuntimeError(
+                    f"grad scaler collapsed to {self.scaler.get_scale():g} at ep "
+                    f"{epoch} it {it+1}: fp16 gradients keep overflowing and the "
+                    f"scaler cannot recover (it only grows after 2000 clean "
+                    f"steps). Switch to training.amp_dtype=bfloat16, or lower "
+                    f"training.lr."
+                )
             recent.append(loss.item())
             self.global_step += 1
             cur_lr = self.optimizer.param_groups[0]["lr"]
@@ -125,7 +169,7 @@ class RadarTacoTrainer:
         all_metrics = []
         for batch in loader:
             batch = self._to_device(batch)
-            with autocast(enabled=self.amp):
+            with autocast(enabled=self.amp, dtype=self.amp_dtype):
                 pred = self.model(batch["rgb_norm"],
                                   batch["radar_points"],
                                   batch["radar_mask"],
@@ -168,7 +212,7 @@ class RadarTacoTrainer:
         for i, sample in enumerate(self.viz_sampler):
             batch = {k: (v.unsqueeze(0).to(self.device) if torch.is_tensor(v) else v)
                      for k, v in sample.items()}
-            with autocast(enabled=self.amp):
+            with autocast(enabled=self.amp, dtype=self.amp_dtype):
                 pred = self.model(batch["rgb_norm"], batch["radar_points"], batch["radar_mask"],
                                   batch.get("rel_depth"))
             if isinstance(pred, dict):
