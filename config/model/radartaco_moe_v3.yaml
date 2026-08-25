@@ -1,0 +1,31 @@
+# RadarTaco MoE v3 — stronger router architecture (Option C).
+#
+# Same as radartaco_moe.yaml except router head:
+#   Old (conv1x1) : Conv2d(C, K, 1)                              — ~1.5K params/router
+#   New (mlp3x3)  : Conv2d(C, 256, 3) → GELU → Conv2d(256,128,3) → GELU → Conv2d(128,K,1)
+#                                                                — ~1.47M params/router
+#
+# Motivation: 88% router accuracy stuck across all prior experiments.
+# Bigger router adds (a) spatial context (3×3 kernels) and (b) non-linearity
+# — both address bottlenecks that a 1×1 linear cannot.
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 8
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+
+# ── MoE options ──
+moe_at_l: [2]
+moe_n_experts: 3
+moe_use_shared: false
+moe_top_k: 1
+moe_stage: 2
+moe_bins: [0.0, 20.0, 50.0, 100.0]
+moe_router_arch: mlp3x3      # ← v3 change

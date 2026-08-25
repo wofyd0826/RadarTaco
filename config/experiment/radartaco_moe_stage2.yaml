@@ -1,0 +1,56 @@
+# @package _global_
+# Stage-2 (self-routing) — DriveMoE §2.5 style.
+#
+# The router now drives expert selection using its own softmax over image
+# features. Task loss is unchanged; router CE is REDUCED (DriveMoE Stage-2
+# λ0=λ2=5) so the flow is dominated by trajectory (depth) accuracy.
+#
+# Warm-start: load stage-1 best checkpoint via
+# `training.load_weights_from=output/radartaco_moe_stage1/last.pt`.
+defaults:
+  - override /model: radartaco_moe
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 2              # self-routing (router picks gate)
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  # Router CE now smaller — router should mostly self-improve via task
+  # loss gradient. Kept nonzero to keep routing anchored to the intuitive
+  # bin labels (guards against router collapse). DriveMoE Stage-2 λ2=5.
+  # NOTE: with moe_stage=2 the model does not emit `router_gt` in its
+  # output dict, so this term is inert unless you re-enable teacher-forcing
+  # (e.g. `model.moe_stage=1`) — set w_router=0 for a pure task-loss run.
+  w_router: 0.0
+
+training:
+  epochs: 20                # fair comparison: total 30+20=50 = baseline
+  # Fill in after stage 1 finishes:
+  # load_weights_from: /path/to/output/radartaco_moe_stage1/last.pt
+
+wandb:
+  name: radartaco_moe_stage2
+  tags: [moe, stage2, self-routing, depth-specialist]
+  notes: >
+    Stage 2 — router self-decides on image feature (global-avg-pool).
+    Warm-started from stage-1 checkpoint. All 4 experts (3 non-shared +
+    1 shared) trained end-to-end with task loss only.

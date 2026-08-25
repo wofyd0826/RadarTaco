@@ -1,0 +1,84 @@
+# @package _global_
+# Replaces AffineInvariantL1 shape supervision with log-depth GRADIENT
+# supervision against dense_gt. Pure shape, scale-invariant by
+# construction — does NOT compete with L1_lidar for absolute metric.
+#
+# Rationale:
+#   AffineInvariantL1 on dense_gt uses a (scale, shift) ROE solve before
+#   the L1 — the affine ABSORBS metric scale differences, but only
+#   per-image / per-block. Per-pixel mismatches between dense_gt and
+#   LiDAR (the stripe sources, |dense-lidar| > 2-5 m at LiDAR rows) are
+#   NOT absorbed by an affine and remain in the L1 residual. The model
+#   gets pulled toward dense_gt's wrong values at those pixels.
+#
+#   Log-depth GRADIENT supervision: ∂_x log(c·D) = ∂_x log(D). Any
+#   per-image / per-pixel metric scale difference is invisible to the
+#   loss because differentiation kills the constant and log() turns
+#   multiplicative scale into an additive constant that the gradient
+#   cancels. The loss sees ONLY the shape (relative depth changes)
+#   of dense_gt — exactly what dense_gt is good at.
+#
+# Loss formula (real samples):
+#   L = w_lidar       · L1(pred, lidar)                              ← metric anchor
+#     + w_grad_shape  · sum_s sum_{x,y} |∂_x log p - ∂_x log d|
+#                                       + |∂_y log p - ∂_y log d|    ← pure shape
+#
+# (No AffineInvariantL1 — replaced entirely by GradientShapeLoss.)
+#
+# Multi-scale (s = 0..3, MiDaS-style) captures both fine edges (1/1)
+# and coarse structure (1/8), avoiding the need for a separate grid.
+
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_refined_grid
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+loss:
+  # Full-strength metric anchor — log-grad shape is scale-invariant so
+  # there is NO conflict to manage; just supervise metric and shape
+  # independently.
+  w_lidar: 1.0
+  lam: 0.0
+  # Gradient-only shape supervision REPLACES the affine-invariant L1.
+  # Runs on the WHOLE image (no valid_mask) — on depth_refined_grid the
+  # dense_invalid pixels are filled with max_depth (100 m), so log(target)
+  # is bounded and including them adds a soft "sky/ego is flat" prior
+  # at near-zero cost (boundary |∂log| ≈ 0.02 vs ≈ 0.15 in valid).
+  #
+  # Magnitude calibration (measured on a nuScenes train batch, no mask):
+  #   init  : raw ≈ 0.03   |  mid: raw ≈ 0.12   |  near-converged: 0.04
+  #   baseline (affineL1_global + affineL1_grid) mid contribution ≈ 0.48.
+  #   ⇒ w_grad_shape=100 gives mid contribution ≈ 12 — dominant
+  #     supervision. L1_lidar (~2 at mid) becomes a soft metric anchor;
+  #     the model mostly learns dense_gt's gradient field. Log-domain
+  #     → still scale-invariant so the two terms do not fight over
+  #     absolute scale.
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  # AffineInvariantL1 disabled (the loss the stripe issue stems from).
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  # All other anchor / consistency / anti-stripe mechanisms disabled.
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+
+wandb:
+  name: shape_lidar_grad_shape
+  tags: [shape-loss, dav2-roe-grid, grad-shape, log-depth, moge-style]
+  notes: >
+    Replaces AffineInvariantL1 with multi-scale log-depth GRADIENT L1 on
+    dense_gt. Scale-invariant by construction (∂ log(c·D) = ∂ log(D))
+    so L1_lidar can run at full strength (w_lidar=1) without competing
+    over absolute metric. Expected: stripes vanish (the per-pixel L1
+    conflict that drives them is gone) while metric quality is preserved
+    via L1_lidar.

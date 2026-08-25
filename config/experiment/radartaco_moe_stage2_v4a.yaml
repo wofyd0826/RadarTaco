@@ -1,0 +1,63 @@
+# @package _global_
+# MoE v4a stage-2 (self-routing) — Option A: top_k=2 with halved experts.
+#
+# This is where top_k=2 actually kicks in:
+#   • Gate = sum-renorm of the two largest softmax probs (both experts
+#     contribute proportionally).
+#   • gate = probs[e1]/(probs[e1]+probs[e2]) is NOT a constant → task loss
+#     now flows through gate → router weights (top_k=1 blocked this).
+#   • w_router keeps the CE anchor active so the router still gets
+#     supervised bin-classification signal alongside task-loss gradients.
+#
+# Warm-start MUST come from the matching v4a stage-1 (halved experts +
+# top_k=2 architecture); v3/v3_fix checkpoints have different tensor
+# shapes and would silently drop params under strict=False.
+defaults:
+  - override /model: radartaco_moe_v4a
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 2
+  moe_use_shared: false
+  moe_top_k: 2
+  moe_expert_ch_ratio: 0.5
+  moe_router_gt_type: hard
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 5.0                # CE anchor; task-loss gradient also flows now
+
+training:
+  epochs: 20
+  load_weights_from: output/radartaco_moe_stage1_v4a/last.pt
+  # Carry LR schedule position + wandb step axis from stage 1 (weights-only
+  # warm start otherwise resets both to 0). Requires stage 1's best.pt to
+  # have been saved with a `global_step` key — true for any stage 1 run
+  # under the updated trainer.
+  load_weights_carry_schedule: true
+
+wandb:
+  name: radartaco_moe_stage2_v4a
+  tags: [moe, stage2, self-routing, no-shared, router-mlp3x3, top_k2, expert-ratio-half, hard-ce, v4a]
+  notes: >
+    Stage-2 MoE v4a — self-routing at top_k=2 with halved experts.
+    Task loss now reaches the router (gate is a differentiable ratio of
+    two probs). 20 epoch warm-start from radartaco_moe_stage1_v4a.

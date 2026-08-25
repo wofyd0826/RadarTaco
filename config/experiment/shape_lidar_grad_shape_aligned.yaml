@@ -1,0 +1,85 @@
+# @package _global_
+# Block-LiDAR-aligned grad shape supervision.
+#
+# Idea (option A): the standard grad_shape loss inherits DAv2's noisy
+# absolute ratios because it supervises ∂log pred against the raw
+# dense_gt. Here, dense_gt is FIRST aligned to LiDAR per K×K block via
+# a robust ROE solve (s_b · dense_gt + b_b on each block's LiDAR
+# pixels). The resulting aligned target has block-local ratio
+# consistency with LiDAR, so the gradient supervision pulls pred
+# toward a LiDAR-correct shape — not a DAv2-correct shape.
+#
+# Loss formula (real samples):
+#   per block b:
+#     (s_b, b_b) = ROE_solve(dense_gt, lidar)  on LiDAR mask
+#   dense_gt_aligned[block] = s_b · dense_gt[block] + b_b
+#
+#   L = w_lidar · L1(pred, lidar)
+#     + w_grad_shape_aligned · sum_s |∂log pred − ∂log dense_gt_aligned|
+#
+# K=8 (8×8 grid → 64 blocks, each ~40×72 px on nuScenes crop). Each
+# block typically contains 2-3 LiDAR rows — enough for stable ROE.
+# Blocks with too few LiDAR points fall back to identity (no
+# correction, supervision still flows through raw dense_gt there).
+#
+# Trade-off vs raw grad_shape:
+#   • DAv2's block-local ratio error: ABSORBED (this loss targets a
+#     LiDAR-aligned reference).
+#   • Block boundary discontinuity: each block has its own (s, b),
+#     creating piecewise-constant offsets that show up in the
+#     gradient field. Multi-scale + log-domain damp the effect; if
+#     visible artifacts appear, set `grad_shape_aligned_trunc=1.0`
+#     to clip outliers, or use larger K (16) for smoother fields.
+
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_refined_grid
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  # Plain grad_shape disabled — this run uses the aligned variant only.
+  w_grad_shape: 0.0
+  # Block-LiDAR-aligned grad shape (target reference is per-block
+  # (s, b)-corrected dense_gt). Same scale as plain grad_shape, so
+  # w=100 carries the same supervision pressure (≈ baseline shape).
+  w_grad_shape_aligned: 100.0
+  grad_shape_aligned_K: 8
+  grad_shape_aligned_scales: 4
+  grad_shape_aligned_use_log: true
+  # Robustness against ROE block instability: drop blocks with < 8
+  # LiDAR pixels, clamp residuals at 1.5 (slightly looser than
+  # plain grad_shape default since per-block alignment can introduce
+  # small boundary jumps).
+  grad_shape_aligned_min_lidar_inliers: 8
+  grad_shape_aligned_align_resolution: 16
+  grad_shape_aligned_roe_trunc: 1.0
+  grad_shape_aligned_trunc: 1.5
+  # AffineInvariantL1 disabled.
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  # All other mechanisms off.
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+
+wandb:
+  name: shape_lidar_grad_shape_aligned
+  tags: [shape-loss, dav2-roe-grid, grad-shape, block-roe, lidar-aligned]
+  notes: >
+    Block-LiDAR-aligned grad shape supervision: dense_gt is per-block
+    ROE-aligned to LiDAR (8×8 grid) BEFORE the gradient L1. The
+    resulting target carries LiDAR-correct block-local ratios; DAv2's
+    block-level absolute ratio error is absorbed into per-block (s,
+    b) and never reaches pred. Expected: same stripe suppression as
+    grad_shape with reduced mid-range MAE loss (the failure mode of
+    plain grad_shape was learning DAv2's wrong ratios).

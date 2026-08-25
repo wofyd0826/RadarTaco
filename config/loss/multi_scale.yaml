@@ -1,15 +1,17 @@
-# Paper Eq. 5 + multi-scale auxiliary L1 against the dense GT.
-# Per-level weights default to a gentle "final-dominant" decay so the
-# coarsest scales remain auxiliary regularizers, not competitors.
+# Paper Eq.5 + multi-scale auxiliary L1 against BOTH sparse lidar and
+# dense (accumulated) GT at each scale — Singh decoder parity.
+# Per-level weights follow Singh's `1/2^(L-1-s)` schedule deepest→shallowest:
+# {1/16, 1/8, 1/4, 1/2} = {0.125, 0.25, 0.5, 1.0}. w_multi_scale=1.0 keeps
+# the aux term on the same order as the main loss.
 lam: 1.0
 w_smooth: 0.0
 w_sim_grad: 0.0
 w_sim_smooth: 0.0
-w_multi_scale: 0.5                       # overall scale of the aux term
+w_multi_scale: 1.0                       # overall scale of the aux term
 multi_scale_per_level_weights:
-  depth_s2:  1.0                         # 1/2 — closest to final
-  depth_s4:  0.5
-  depth_s8:  0.25
-  depth_s16: 0.125                       # 1/16 — coarsest, lightest weight
+  depth_s2:  1.0                         # 1/2 — closest to final (Singh w_scale=1)
+  depth_s4:  0.5                         # 1/4 (Singh w_scale=1/2)
+  depth_s8:  0.25                        # 1/8 (Singh w_scale=1/4)
+  depth_s16: 0.125                       # 1/16 — coarsest (Singh w_scale=1/8)
 smoothness_rgb_grad_weight: 1.0
 grad_scales: 4

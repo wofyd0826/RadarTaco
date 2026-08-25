@@ -1,0 +1,81 @@
+# @package _global_
+# Replaces AffineInvariantL1 + raw-gradient shape with SIGN-only gradient
+# supervision against dense_gt. Pure ordering — does NOT learn the
+# (often-wrong) absolute gradient ratios of DAv2-derived dense_gt.
+#
+# Rationale (user-driven):
+#   depth_refined_grid (DAv2 + grid ROE) gets neighbor ORDERING right
+#   ("A is farther than B") but its absolute RATIOS can be off ("A is
+#   2.3× farther"). Standard GradientShapeLoss matches the values of
+#   ∂log target, baking those wrong ratios into pred. GradientSignLoss
+#   matches only the SIGN of ∂target, leaving the gradient magnitude
+#   free — the trustworthy half of dense_gt is supervised, the noisy
+#   half is ignored.
+#
+# Loss formula (real samples, per scale and axis):
+#   penalty = |∂target| · relu( -∂pred · sign(∂target) )
+#
+#   • |∂target| weight: only clear edges contribute; flat regions
+#     (where target ordering is noisy) auto-down-weight to ~0.
+#   • relu(...) hinge: zero penalty when pred ∂ has the same sign,
+#     |pred·∂| only when opposite. Pred's MAGNITUDE is unconstrained.
+#   • log-domain → invariant to per-image metric scale → no fight with
+#     L1_lidar over absolute depth at any weight.
+#
+#   L_total = w_lidar · L1_lidar  +  w_grad_sign · L_sign
+#
+# Multi-scale (1/1, 1/2, 1/4, 1/8) — fine scale (1/1) carries neighbor
+# ordering, which is exactly DAv2's strong point (edges, object
+# boundaries), so detail is preserved through ordering alone.
+#
+# Optional hybrid: set w_grad_shape > 0 (e.g. 0.5) to add a SOFT
+# magnitude prior on top — useful only if pure sign-only loses too
+# much detail in practice. Start with sign-only first.
+#
+# Magnitude calibration (one nuScenes train batch):
+#   trajectory raw_sign ≈ 0.0001 (near-converged) → 0.02 (worst case)
+#   ⇒ w_grad_sign=1000 gives early contribution ≈ 0.65 (~1.35× the
+#     baseline shape contribution ≈ 0.48), auto-decays to ≈ 0.04 as
+#     ordering converges — strong correction early, gentle late.
+
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_refined_grid
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+loss:
+  # Full-strength metric anchor — sign loss is scale-invariant, no conflict.
+  w_lidar: 1.0
+  lam: 0.0
+  # Gradient-SIGN supervision.
+  w_grad_sign: 10000.0
+  grad_sign_scales: 4
+  grad_sign_use_log: true
+  # Soft magnitude prior (off by default). Set to e.g. 0.5 for hybrid.
+  w_grad_shape: 0.0
+  # AffineInvariantL1 disabled (replaced).
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  # Other anchor / consistency / anti-stripe mechanisms off.
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+
+wandb:
+  name: shape_lidar_grad_sign
+  tags: [shape-loss, dav2-roe-grid, grad-sign, hinge, ordering-only]
+  notes: >
+    Pure sign-only multi-scale gradient supervision on dense_gt. Hinge
+    form penalised by |target gradient|: enforces neighbor ordering
+    without learning DAv2's noisy absolute ratios. Log-domain →
+    scale-invariant; L1_lidar runs at full strength (w_lidar=1) with
+    no conflict. Detail is preserved through fine-scale ordering, not
+    through magnitude matching.

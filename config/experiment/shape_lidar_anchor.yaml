@@ -1,0 +1,65 @@
+# @package _global_
+# Option 1: Standard affine-invariant shape (pure shape supervision)
+#           + (a, b) penalty using the (pred, LiDAR) ROE solve.
+#
+# Rationale:
+#   • Standard AffineInvariantL1 only supervises pred's *shape* against
+#     dense_gt — the (a, b) absorbs any metric scale so dense_gt's
+#     metric errors do NOT leak into pred (this was the user's concern
+#     with LidarAnchoredShape, where the L1 residual is against
+#     dense_gt and forces pred toward dense's wrong values).
+#   • The affine-anchor penalty uses a SEPARATE ROE solve on
+#     (pred, LiDAR) — pulling pred's metric toward LiDAR's true scale.
+#   • A small `w_lidar` keeps a soft per-pixel metric anchor; the
+#     consistency-mask term in shape_lidar_consistency.yaml is the
+#     alternative path for handling LiDAR-row stripes.
+#
+# Loss formula (real samples):
+#   L = w_lidar               · L1(pred, lidar)                            ← weak metric anchor
+#     + w_shape_global        · AffineInvariantL1(pred, dense_gt)          ← shape (free affine)
+#     + w_shape_grid          · BlockGridAffineInvariantL1(pred, dense_gt, K=8)
+#     + w_affine_anchor       · mean((a-1)² + b²)                          ← (a,b) FROM (pred, lidar)
+#
+# Override `w_lidar` and `w_affine_anchor` to sweep the metric-anchor
+# strength along two axes (hard per-pixel vs soft global).
+
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_refined_grid
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+loss:
+  # Weak per-pixel metric anchor (vs current shape_lidar's 1.0). The
+  # stronger metric pull now comes from `w_affine_anchor`.
+  w_lidar: 0.1
+  lam: 0.0
+  # Standard affine-invariant shape losses — PRESERVED (pure shape).
+  w_shape_global: 1.0
+  w_shape_grid: 1.0
+  # LidarAnchored loss disabled — we only use its (a, b) for the penalty.
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  # (a, b) → (1, 0) penalty, on the (pred, LiDAR) affine.
+  w_affine_anchor: 1.0
+  shape_align_resolution: 32
+  shape_grid_K: 8
+  shape_grid_align_resolution: 16
+  shape_trunc: 1.0
+  shape_grid_min_inliers: 30
+
+wandb:
+  name: shape_lidar_anchor
+  tags: [shape-loss, dav2-roe-grid, lidar-anchor, affine-anchor, moge-style]
+  notes: >
+    Standard affine-invariant shape (pure shape supervision against
+    dense_gt) + (a, b) → (1, 0) penalty on the (pred, LiDAR) ROE.
+    The penalty provides a soft global metric anchor toward LiDAR
+    without forcing pred to match dense_gt's wrong per-pixel values.
+    w_lidar lowered to 0.1 so the per-pixel hard L1 (stripe source) is
+    much weaker; the metric anchor now mostly comes from the penalty.

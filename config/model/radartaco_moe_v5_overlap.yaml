@@ -1,0 +1,45 @@
+# RadarTaco MoE v5 — overlap bins + sigmoid + BCE per-bin router loss.
+#
+# Same architecture family as v4c (top_k=2, halved experts, mlp3x3 router).
+# Differences vs v4c:
+#   • moe_router_gt_type: overlap
+#       Router GT is per-bin OVERLAP membership (float, sum-of-K can be > 1).
+#       A pixel at 22 m simultaneously counts as "near" (0-25) AND "mid"
+#       (15-55) — no argmax-flip noise at bin boundaries.
+#   • moe_overlap_bins: [[0,25],[15,55],[45,100]]
+#       ±5 m overlap zones around the original 20/50 m edges.
+#   • Loss: sigmoid + BCE per bin (independent classification). The loss
+#     factory auto-dispatches based on router_gt_type reported by the model.
+#   • Gate at inference: sigmoid(logits) → renormalize → top_k=2. Semantic
+#     match with training (BCE learns each bin independently).
+#
+# Why: BCE + overlap breaks two ceilings observed with softmax + soft CE
+# (v4c) — (a) boundary tokens' argmax label instability, and (b) softmax
+# competition that suppresses minority (far) class learning.
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 8
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+
+# ── MoE options ──
+moe_at_l: [2]
+moe_n_experts: 3
+moe_use_shared: false
+moe_top_k: 2
+moe_stage: 2
+moe_bins: [0.0, 20.0, 50.0, 100.0]           # used ONLY for hard/soft; ignored here
+moe_router_arch: mlp3x3
+moe_expert_ch_ratio: 0.5
+moe_router_gt_type: overlap                   # ← v5: overlap bins + sigmoid+BCE
+moe_overlap_bins:                             # (lo, hi) per bin; last is open-ended upward
+  - [0.0, 25.0]                               # near — overlaps mid at 15-25
+  - [15.0, 55.0]                              # mid  — overlaps near at 15-25, far at 45-55
+  - [45.0, 100.0]                             # far  — overlaps mid at 45-55; open-ended >100

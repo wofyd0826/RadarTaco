@@ -1,0 +1,56 @@
+# @package _global_
+# MoE v3 stage-1 (teacher forcing) re-run on the fixed radar path.
+#
+# Identical to `radartaco_moe_stage1_v3.yaml`; differs only in the code it
+# runs against — the seven radar-path fixes plus MoE token dispatch:
+#
+#   • each expert now runs ONLY on the tokens routed to it. With top_k=1 the
+#     measured occupancy is 48/32/21%, so the dense version paid 3x. Block
+#     latency 7.04 -> 5.40 ms, training peak memory 1.47 -> 0.92 GB.
+#   • each expert normalises over its own routed tokens instead of the full
+#     map (`_masked_group_norm`). Required for dispatch and the standard MoE
+#     reading, but it means checkpoints from the earlier v3 run are NOT a
+#     valid warm start for this one.
+#
+# Stage 1 trains from scratch, so no checkpoint dependency here — stage 2 is
+# the one that must chain off THIS run (see radartaco_moe_stage2_v3_fix.yaml).
+defaults:
+  - override /model: radartaco_moe_v3
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 1
+  moe_use_shared: false
+  moe_top_k: 1
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 10.0
+
+training:
+  epochs: 30
+
+wandb:
+  name: radartaco_moe_stage1_v3_fix
+  tags: [moe, stage1, teacher-forcing, no-shared, router-mlp3x3, radar-path-fix]
+  notes: >
+    Stage-1 MoE v3 on the fixed radar path, with per-token expert dispatch.
+    30 epoch teacher-forcing from scratch. Baseline: radartaco_moe_stage1_v3.

@@ -1,0 +1,64 @@
+# @package _global_
+# Stage-1 (teacher-forcing) — DriveMoE §2.5 style.
+#
+# The MoE bottleneck's non-shared experts (+ shared expert) are trained
+# with the router GATE HARD-FIXED to the per-sample GT depth bin (argmax
+# over dense-GT pixel counts), while the router network itself is
+# supervised by cross-entropy against the same bin label. This gives:
+#   • Experts see cleanly-partitioned data (like our loss-mask experiment)
+#     but forward-pass runs in the *joint* MoE architecture — so they
+#     learn to compose with the shared expert.
+#   • Router learns to predict the bin without ever driving expert
+#     selection — no chicken-and-egg with expert half-trained state.
+#
+# Warm-start from baseline + 3 specialists is done via
+# `scripts/warm_start_moe.py` — pass its output as `training.load_weights_from`.
+#
+# Same task loss as `shape_lidar_grad_shape_edge_res`:
+#   L = 1.0 · L1(pred, lidar)  +  100 · Σ_s |∂log pred − ∂log dense|
+# plus router CE with `w_router` (this file).
+defaults:
+  - override /model: radartaco_moe
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 1              # teacher-forcing
+  # (moe_at_l / experts / bins inherit from radartaco_moe.yaml)
+
+loss:
+  # Base — identical to shape_lidar_grad_shape_edge_res
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  # Router CE — DriveMoE stage-1 uses supervised routing loss.
+  # Weight follows DriveMoE Stage-1 λ0=λ2=10 (their router losses).
+  w_router: 10.0
+
+training:
+  epochs: 30                # fair comparison: total 30+20=50 = baseline
+  # Warm-start from `scripts/warm_start_moe.py` output.
+  # load_weights_from: /path/to/output/radartaco_moe_warm/init.pt
+
+wandb:
+  name: radartaco_moe_stage1
+  tags: [moe, stage1, teacher-forcing, depth-specialist]
+  notes: >
+    Depth-specialised MoE bottleneck (1 shared + 3 experts, image-only
+    router). Stage 1: teacher-forced by dense-GT bin (argmax over
+    [0,20)/[20,50)/[50,100)m pixels) with router CE supervision.

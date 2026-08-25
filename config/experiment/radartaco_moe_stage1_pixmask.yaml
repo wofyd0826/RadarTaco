@@ -1,0 +1,60 @@
+# @package _global_
+# Stage-1 (teacher-forcing) + per-pixel MoE bin mask.
+#
+# What's new vs radartaco_moe_stage1.yaml:
+#   • loss.moe_pixel_bin_mask=true — each pixel is included in supervision
+#     ONLY when its own depth-bin equals the routed bin of the token
+#     containing it. Mixed tokens: minority-bin pixels get NO gradient.
+#     This reproduces the loss-mask specialist regime inside MoE.
+#   • model.moe_use_shared=false — 3 experts only, no shared expert.
+#
+# Rationale: fusion-only specialist experiment (fusion_only_bin_{near,mid,far})
+# demonstrated that a 3.8M L2-fusion block with focused (bin-masked) loss
+# beats baseline by 25-48% in-bin. MoE stage-1 with pixel-level mask
+# should recover the same regime for each expert.
+defaults:
+  - override /model: radartaco_moe
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 1
+  moe_use_shared: false
+  # moe_at_l / moe_n_experts / moe_bins inherit from radartaco_moe.yaml
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 10.0
+  # Per-pixel MoE bin mask (see ComposedLoss.forward). Uses model's
+  # router_gts (majority-vote per-token bin) and depth_gt_dense to
+  # intersect valid_mask with (pixel_bin == token_routed_bin).
+  moe_pixel_bin_mask: true
+  moe_pixel_bin_mask_bins: [0.0, 20.0, 50.0, 100.0]
+
+training:
+  epochs: 30
+
+wandb:
+  name: radartaco_moe_stage1_pixmask
+  tags: [moe, stage1, teacher-forcing, depth-specialist, no-shared, pixel-mask]
+  notes: >
+    Stage-1 MoE (3 experts, no shared) + per-pixel bin mask.
+    Each expert supervised only on its own bin's pixels within routed
+    tokens — mirroring loss-mask specialist regime at 3.8M capacity.

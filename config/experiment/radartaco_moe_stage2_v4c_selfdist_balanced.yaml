@@ -1,0 +1,80 @@
+# @package _global_
+# MoE v4c stage-2 + router SELF-DISTILLATION (balanced).
+#
+# Motivation:
+#   Router's job is not to guess the GT bin per se — it's to route so that the
+#   model produces good depth. Self-distillation supervises the router with the
+#   pixel_fraction of the MODEL'S OWN final depth (bucketized to `moe_bins`),
+#   making the router consistent with what the model actually predicts.
+#
+#   Advantages over GT-only CE:
+#     • Target is smooth (model prediction) rather than noisy at bin boundaries
+#     • Aligns router with "routing utility" instead of "labelled bin accuracy"
+#     • Free (no extra compute, ~0 param, ~30 lines of loss code)
+#
+#   Risk (circular signal): router→gate→depth→bucketize→target→router. Mitigated
+#   by (a) detach on `depth` before bucketizing (no gradient flow), (b) keeping
+#   GT CE alongside as a "reality anchor" (this "balanced" config), (c)
+#   warm-starting from v4c stage 1 so `depth` is meaningful from step 0.
+#
+# Weight ratio (this config): w_router=3.0 + w_router_selfdist=2.0.
+#   Total router loss magnitude ≈ 5.0 (matches original v4c stage-2), split
+#   roughly evenly between GT anchor and self-consistency signal.
+#
+# Contrast: `radartaco_moe_stage2_v4c_selfdist_only.yaml` sets w_router=0 and
+# w_router_selfdist=5.0 (pure self-dist, higher circular risk, ablation).
+defaults:
+  - override /model: radartaco_moe_v4c
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 2
+  moe_use_shared: false
+  moe_top_k: 2
+  moe_expert_ch_ratio: 0.5
+  moe_router_gt_type: soft
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  # Balanced router supervision:
+  #   GT CE (soft, from dense-depth pixel_fraction) — keeps router anchored to
+  #   reality; magnitude tuned so its contribution matches self-dist below.
+  w_router: 3.0
+  # Self-distillation: soft-CE against pixel_fraction of the model's OWN final
+  # depth (detached, bucketized to `moe_bins`), per router block. Rewards the
+  # router for routing consistently with what the model will actually produce.
+  w_router_selfdist: 2.0
+
+training:
+  epochs: 20
+  # Warm-start from v4c stage 1 (established GT-based router) so `depth` is
+  # meaningful from step 0 — avoids feeding random depth into self-dist target.
+  load_weights_from: output/radartaco_moe_stage1_v4c/last.pt
+  load_weights_carry_schedule: true
+
+wandb:
+  name: radartaco_moe_stage2_v4c_selfdist_balanced
+  tags: [moe, stage2, self-routing, no-shared, router-mlp3x3, top_k2,
+         expert-ratio-half, soft-ce, v4c, self-distillation, balanced]
+  notes: >
+    Stage-2 MoE v4c with router SELF-DISTILLATION (balanced). Router supervised
+    by GT soft-CE (w=3.0) + self-dist soft-CE against model's own final depth
+    (w=2.0, detached target). Warm-start from v4c stage 1. 20 epoch.

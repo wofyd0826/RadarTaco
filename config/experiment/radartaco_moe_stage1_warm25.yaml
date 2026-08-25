@@ -1,0 +1,55 @@
+# @package _global_
+# Stage-1 (teacher-forcing) — warm-started from baseline @ epoch 25.
+#
+# Setup:
+#   • Baseline (single-fusion) trained for 25 epochs → weights loaded
+#   • Each of 3 non-shared experts = CLONE of baseline's L2 fusion block
+#   • Router: random init, learned via CE against per-token bin GT
+#   • Encoder, decoder, L0/L1 fusion: baseline weights (continue training)
+#   • Loss: standard task loss (L1_lidar + 100·grad_shape) + w_router·CE
+#     — NO pixel bin mask (user specified)
+#
+# Training budget: 25 (baseline) + 15 (stage 1) + 10 (stage 2) = 50 epochs
+# → matches baseline total budget for fair comparison.
+defaults:
+  - override /model: radartaco_moe
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 1
+  moe_use_shared: false      # 3 experts only
+  moe_top_k: 1               # ignored in stage 1 (gate is one-hot GT)
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 10.0             # DriveMoE stage-1 CE weight
+
+training:
+  epochs: 15
+  load_weights_from: output/radartaco_moe_warm_from_baseline25/init.pt
+
+wandb:
+  name: radartaco_moe_stage1_warm25
+  tags: [moe, stage1, teacher-forcing, warm-start-baseline25, no-shared]
+  notes: >
+    Stage-1 MoE (3 experts, no shared) warm-started from baseline @ e25.
+    Each expert = clone of baseline L2 fusion. 15 epochs teacher-forcing
+    with router CE (w=10). No pixel bin mask.

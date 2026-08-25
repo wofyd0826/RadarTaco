@@ -1,0 +1,50 @@
+# @package _global_
+# Stage-2 (self-routing) — continues from stage-1 warm25 checkpoint.
+#
+# Router transitions from GT-forced to self-decided (softmax → top-1).
+# Task loss dominates; router CE dropped to 0 (pure self-routing).
+#
+# Set training.load_weights_from to the stage-1 warm25 output before
+# launching (e.g. output/radartaco_moe_stage1_warm25/best.pt).
+defaults:
+  - override /model: radartaco_moe
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 2               # self-routing
+  moe_use_shared: false      # 3 experts only
+  moe_top_k: 1               # top-1 per token
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 0.0              # pure task loss
+
+training:
+  epochs: 10
+  # Fill after stage 1 finishes:
+  load_weights_from: output/radartaco_moe_stage1_warm25/last.pt
+
+wandb:
+  name: radartaco_moe_stage2_warm25
+  tags: [moe, stage2, self-routing, warm-start-baseline25, no-shared]
+  notes: >
+    Stage-2 MoE self-routing. Warm-started from stage-1 warm25 best.pt.
+    10 epochs, top-1 per token, pure task loss.

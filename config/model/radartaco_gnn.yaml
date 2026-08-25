@@ -1,7 +1,11 @@
 # GNN radar encoder (paper-faithful) — DEFAULT
 name: radartaco
 radar_encoder: gnn          # 'gnn' or 'mlp'
-k_neighbors: 20              # DGCNN-style kNN size
+# DGCNN-style kNN size. nuScenes gives ~97 radar points/frame, so k=20 covered
+# 21.8% of the cloud and the 20th neighbour sat 17 m away — a sparse *global*
+# graph, not the local one EdgeConv assumes. k=8 pulls the neighbourhood back
+# inside a few metres.
+k_neighbors: 8
 mlp_hidden: 128              # only used when radar_encoder='mlp'
 a_l: [48.0, 32.0, 16.0]      # paper §4.2 + supp Table 9 — radar-centered window widths
 radar_channels: [64, 128, 512]

@@ -1,0 +1,58 @@
+# @package _global_
+# MoE v4c stage-1 (teacher forcing) — v4c + Class-Balanced weighted CE.
+#
+# Identical to radartaco_moe_stage1_v4c except router CE per-class weights
+# are set. Weights are inverse-sqrt of nuScenes-valid pixel-bin frequency
+# (near : mid : far ≈ 67 : 25 : 8 %), normalized to mean=1:
+#     w_near = 0.54    w_mid = 0.89    w_far = 1.56
+# The full class-balanced formula (Cui 2019 β-effective-number) saturates
+# on our token count (~5M valid), so inverse-sqrt is used as the moderate
+# imbalance-aware weight. Adjust if needed:
+#     • [1.0, 1.5, 3.0] — moderate manual (matches original suggestion)
+#     • [0.42, 0.94, 1.64] — β=0.9999 CB (very close to inv-sqrt anyway)
+#     • [0.5, 1.34, 4.13] — inverse-frequency (aggressive, may overfit far)
+defaults:
+  - override /model: radartaco_moe_v4c
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 1
+  moe_use_shared: false
+  moe_top_k: 2
+  moe_expert_ch_ratio: 0.5
+  moe_router_gt_type: soft
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 10.0
+  router_class_weight: [0.54, 0.89, 1.56]
+
+training:
+  epochs: 30
+
+wandb:
+  name: radartaco_moe_stage1_v4c_cb
+  tags: [moe, stage1, teacher-forcing, no-shared, router-mlp3x3, top_k2, expert-ratio-half, soft-ce, class-balanced, v4c_cb]
+  notes: >
+    Stage-1 v4c with class-balanced weighted CE on the router. Weights
+    are inverse-sqrt of valid pixel-bin frequency (near/mid/far ~
+    0.54/0.89/1.56). Aims to lift far-bin recall — analysis shows far
+    is 8% of valid pixels but drives 46% of BADLY misrouted tokens (far→mid).

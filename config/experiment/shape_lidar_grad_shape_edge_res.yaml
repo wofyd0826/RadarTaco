@@ -1,0 +1,48 @@
+# @package _global_
+# shape_lidar_grad_shape variant — dense_gt = depth_edge_res
+#   (GPU edge-aware residual interp, depth-guided, σ_s=20, σ_r=1.0, K=200,
+#    + A+C valid-mask handling; built by
+#    scripts/build_dense_gt_edge_residual.py).
+#
+# Train-set MAE vs depth_lidar @ {50, 70, 80} m = {0.797, 0.961, 1.001} m
+# Val-set    MAE vs depth_lidar @ {50, 70, 80} m = {0.791, 0.964, 1.009} m
+#
+# Loss formula (identical to shape_lidar_grad_shape.yaml):
+#   L = w_lidar       · L1(pred, lidar)                              ← metric anchor
+#     + w_grad_shape  · sum_s sum_{x,y} |∂_x log p - ∂_x log d|
+#                                       + |∂_y log p - ∂_y log d|    ← pure shape
+# Only the dense GT source differs.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+
+wandb:
+  name: shape_lidar_grad_shape_edge_res
+  tags: [shape-loss, dense-gt-edge-res, grad-shape, log-depth, moge-style]
+  notes: >
+    Same loss config as shape_lidar_grad_shape — multi-scale log-depth
+    gradient L1 on dense_gt + L1 metric anchor from depth_lidar — but
+    dense_gt source is depth_edge_res (GPU edge-aware residual interp).
+    Tests whether a LiDAR-anchored dense GT helps log-grad shape
+    supervision (vs the default depth_refined_grid).

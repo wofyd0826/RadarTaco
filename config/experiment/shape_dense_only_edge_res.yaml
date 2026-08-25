@@ -1,0 +1,32 @@
+# @package _global_
+# Minimal dense-GT-only baseline: pure L1(pred, depth_edge_res).
+# NO LiDAR L1, NO shape (affine-invariant) loss.
+#
+# Loss formula:
+#   L = lam · L1(pred, depth_edge_res)              ← sole supervision
+#
+# Tests whether LiDAR-aligned dense GT alone (via plain L1, no shape
+# loss, no sparse-LiDAR anchor) is sufficient for accurate metric depth.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+
+loss:
+  w_lidar: 0.0            # LiDAR anchor OFF
+  lam: 1.0                # dense_gt L1 ON (sole supervision)
+  w_shape_global: 0.0     # shape loss OFF — pure L1 baseline
+  w_shape_grid: 0.0
+
+wandb:
+  name: shape_dense_only_edge_res
+  tags: [shape-loss, dense-gt-edge-res, no-lidar-anchor, moge-style]
+  notes: >
+    Identical to shape_lidar_edge_res but with w_lidar=0 and lam=1.0 —
+    no raw LiDAR supervision; metric scale comes solely from
+    depth_edge_res (LiDAR-aligned dense GT). Measures the value of the
+    LiDAR-aligned dense GT as a stand-alone supervision source.

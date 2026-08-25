@@ -7,7 +7,7 @@ emits a node feature `N_l: (B, K, C_l)` and a soft adjacency edge feature
 Adapted from /workspace/RGM/models/{dgcnn,gconv}.py and
 /workspace/dgcnn/pytorch/model.py.
 """
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -15,12 +15,19 @@ import torch.nn.functional as F
 
 
 def masked_knn(coords: torch.Tensor, valid: torch.Tensor, k: int) -> torch.Tensor:
-    """Padding-aware kNN. Invalid keys get -inf so they're never selected."""
+    """Padding-aware kNN. Invalid keys get -inf so they're never selected.
+
+    When a frame holds fewer valid points than `k`, `topk` fills the remainder
+    from the -inf (padded) entries, injecting phantom neighbours at the origin.
+    `k_eff` is therefore clamped to the smallest valid count in the batch.
+    nuScenes never triggers this (min 49 points/frame) but sparser sensors do.
+    """
     inner = -2 * torch.matmul(coords.transpose(2, 1).contiguous(), coords)        # (B,K,K)
     xx = (coords ** 2).sum(dim=1, keepdim=True)
     pairwise = -xx - inner - xx.transpose(2, 1).contiguous()                       # neg dist²
     pairwise = pairwise.masked_fill(~valid[:, None, :], float("-inf"))
-    k_eff = min(k, pairwise.size(-1))
+    n_min = int(valid.sum(dim=-1).min().item())
+    k_eff = max(1, min(k, pairwise.size(-1), n_min))
     return pairwise.topk(k=k_eff, dim=-1)[1]                                       # (B,K,k)
 
 
@@ -91,11 +98,21 @@ class _EdgeGenerator(nn.Module):
         self.k_proj = nn.Linear(ch, d)
         self.scale = d ** -0.5
 
-    def forward(self, node: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+    def forward(self, node: torch.Tensor, valid: torch.Tensor,
+                knn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         x = node.transpose(1, 2).contiguous()
         q = self.q_proj(x)
         k = self.k_proj(x)
         scores = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        # Geometric prior: restrict each row's candidates to its kNN. Without
+        # it the softmax runs over every valid point and collapses to a
+        # query-independent (rank-1) matrix — measured 98.6% first-singular-
+        # value energy on E_2, i.e. every point's "relation profile" is the
+        # same vector, which makes the fusion edge blocks' keys
+        # indistinguishable. Restricting candidates makes rank-1 impossible
+        # because each row sees a different candidate set.
+        if knn_mask is not None:
+            scores = scores.masked_fill(~knn_mask, float("-inf"))
         scores = scores.masked_fill(~valid[:, None, :], float("-inf"))
         adj = torch.softmax(scores, dim=-1)
         adj = torch.nan_to_num(adj, nan=0.0)
@@ -130,15 +147,21 @@ class _GraphRadarLayer(nn.Module):
         self.gconv = _Gconv(out_ch, out_ch)
         self.skip = nn.Linear(in_ch, out_ch) if (not is_first and in_ch != out_ch) else None
 
-    def forward(self, coords, node_in, knn_idx, valid):
+    def forward(self, coords, node_in, knn_idx, valid, knn_mask=None):
         if self.is_first:
             edge_feat = gather_graph_feature(coords, knn_idx)
         else:
             edge_feat = gather_neighbor_features(node_in, knn_idx)
+        # Padded query rows are NOT zero here: kNN only ever picks valid
+        # neighbours, so a padded point's feature is [nbr - 0, 0] = [nbr, 0].
+        # Those rows are ~24% of the (K, k) grid and feed the BatchNorms inside
+        # `node_gen` — masking after `node_gen` (as the line below does) is too
+        # late, the statistics have already absorbed them. Mask here instead.
+        edge_feat = edge_feat * valid[:, None, :, None].to(edge_feat.dtype)
         node = self.node_gen(edge_feat)
         node = node * valid[:, None, :].float()
 
-        adj = self.edge_gen(node, valid)
+        adj = self.edge_gen(node, valid, knn_mask)
         x = node.transpose(1, 2).contiguous()
         x = self.gconv(adj, x)
         if not self.is_first:
@@ -186,10 +209,16 @@ class GnnRadarEncoder(nn.Module):
         coords = radar_points[:, :, :3].transpose(1, 2).contiguous()               # (B,3,K)
         coords = coords * radar_mask[:, None, :].float()
         knn_idx = masked_knn(coords, radar_mask, self.k)
+        # (B, K, K) boolean adjacency of the geometric graph, reused by every
+        # layer's `_EdgeGenerator` to restrict its softmax candidates.
+        knn_mask = torch.zeros(radar_points.shape[0], radar_points.shape[1],
+                               radar_points.shape[1], dtype=torch.bool,
+                               device=radar_points.device)
+        knn_mask.scatter_(2, knn_idx, True)
         N_list, E_list = [], []
         node = None
         for layer in self.layers:
-            node, adj = layer(coords, node, knn_idx, radar_mask)
+            node, adj = layer(coords, node, knn_idx, radar_mask, knn_mask)
             N_list.append(node.transpose(1, 2).contiguous())                       # (B,K,C_l)
             E_list.append(adj)
         return N_list, E_list

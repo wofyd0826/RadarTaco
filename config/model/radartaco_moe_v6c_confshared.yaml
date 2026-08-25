@@ -1,0 +1,66 @@
+# RadarTaco MoE v6c_confshared — DISJOINT training + confidence gating at INFERENCE.
+#
+# Difference from v6b: `moe_shared_gate_mode: confidence_infer` →
+# `confidence_infer_disjoint`. Both configs use `moe_shared_aux: true`.
+#
+# What "confidence_infer_disjoint" mode does (see MoEFusionBlock.forward):
+#   Training:
+#     • `mixed` (main head)          = feat + Σ_k spec_gate[k]·(expert_k − feat)
+#         → specialists ONLY (shared_weight ← 0 in mixed).
+#     • `mixed_shared_only` (aux)    = feat + shared_delta
+#         → shared ONLY, produced via `return_shared_only=True`.
+#     Consequence: the two heads are DISJOINT — specialists get gradient
+#     from the main task loss only, shared gets gradient from the aux task
+#     loss only. No entanglement through a joint mixed prediction.
+#
+#   Inference:  spec_gate ← spec_gate · α, shared_weight ← 1 − α
+#     α = (K · max(gate) − 1) / (K − 1) ∈ [0, 1]
+#     → the two disjointly-trained paths are combined by confidence.
+#
+#   Intent:
+#     • v6a trained shared only on uncertain tokens → shared underfit.
+#     • v6b trained shared always-on together with specialists → shared
+#       gradient still entangled with specialist mixture, and inference
+#       switches to a different formula (train-test mismatch inside the
+#       joint head).
+#     • v6c trains each head STANDALONE — specialists learn to predict on
+#       their own, shared learns generalist prediction on its own. At
+#       inference the α gate is a pure weighted average of two
+#       independently-trained predictors.
+#
+#   Trade-off: main-head training loses the shared fallback signal during
+#   backprop (specialists must be self-sufficient on every token). Aux
+#   head is a pure standalone predictor. If both heads learn well, the
+#   α-mix at inference is a principled ensemble; if either head fails,
+#   the mix degrades gracefully because the other head is still valid.
+#
+# All other MoE axes match v6a / v6b.
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 8
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+
+# ── MoE options ──
+moe_at_l: [2]
+moe_n_experts: 3
+moe_use_shared: true
+moe_top_k: 2
+moe_stage: 2
+moe_bins: [0.0, 20.0, 50.0, 100.0]
+moe_router_arch: mlp3x3
+moe_expert_ch_ratio: 0.5
+moe_router_gt_type: soft
+moe_shared_gate_mode: confidence_infer_disjoint   # ← v6c: disjoint train / conf infer
+
+# Auxiliary shared-only depth head — REQUIRED for this mode (main head has
+# no shared contribution during training, so shared would receive NO
+# gradient without the aux path). Set to true.
+moe_shared_aux: true

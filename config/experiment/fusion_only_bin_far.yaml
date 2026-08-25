@@ -1,0 +1,47 @@
+# @package _global_
+# Fusion-only specialist — FAR bin.
+# See fusion_only_bin_near.yaml for full docs.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  depth_bin_min: 50.0
+  depth_bin_max: 100.0
+
+training:
+  epochs: 30
+  load_weights_from: output/shape_lidar_grad_shape_edge_res/best.pt
+  freeze_modules:
+    - image_encoder
+    - radar_encoder
+    - depth_decoder
+    - radar_fusion.node_blocks.0
+    - radar_fusion.node_blocks.1
+    - radar_fusion.edge_blocks.0
+    - radar_fusion.edge_blocks.1
+
+wandb:
+  name: fusion_only_bin_far
+  tags: [fusion-only, depth-specialist, bin-far, edge-res]
+  notes: >
+    Fusion-only far specialist. See fusion_only_bin_near.yaml.

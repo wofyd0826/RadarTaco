@@ -1,0 +1,58 @@
+# @package _global_
+# MoE v6a_confshared stage-1 — conservation confidence gating (train + infer).
+#
+# Same recipe as radartaco_moe_stage1_v5_shared EXCEPT
+#   moe_shared_gate_mode: always_on → confidence
+#
+# α is derived from the soft teacher-force gate (pixel_fraction). PURE
+# targets (max=1) have α=1 → specialists only. MIXED targets have α<1 →
+# shared partially fills in. Shared receives gradient exclusively from
+# MIXED-target tokens.
+#
+# Run order:
+#   1. python scripts/train.py +experiment=radartaco_moe_stage1_v6a_confshared
+#   2. python scripts/train.py +experiment=radartaco_moe_stage2_v6a_confshared
+defaults:
+  - override /model: radartaco_moe_v6a_confshared
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 1
+  moe_use_shared: true
+  moe_shared_gate_mode: confidence
+  moe_top_k: 2
+  moe_expert_ch_ratio: 0.5
+  moe_router_gt_type: soft
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 10.0
+
+training:
+  epochs: 30
+
+wandb:
+  name: radartaco_moe_stage1_v6a_confshared
+  tags: [moe, stage1, shared-confidence-conservation, router-mlp3x3, top_k2, expert-ratio-half, soft-ce, v6a_confshared]
+  notes: >
+    Stage-1 MoE v6a_confshared — conservation confidence gating in BOTH
+    training and inference. Specialists scaled by α, shared by (1−α).
+    Shared learns from mixed-target tokens only (α<1). 30 epoch from scratch.

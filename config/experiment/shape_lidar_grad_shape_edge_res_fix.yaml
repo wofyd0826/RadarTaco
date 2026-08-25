@@ -1,0 +1,65 @@
+# @package _global_
+# shape_lidar_grad_shape_edge_res re-run on the fixed radar path.
+#
+# Loss / dataset / schedule are byte-identical to
+# `shape_lidar_grad_shape_edge_res.yaml`; the only difference is the code it
+# runs against, so the pair isolates the effect of the fixes:
+#
+#   GNN encoder
+#     • edge_feat masked right after gather — padded query rows were ~24% of
+#       the BatchNorm input and are not zero ([nbr - 0, 0]).
+#     • k_eff clamped to the batch's smallest valid count.
+#     • _EdgeGenerator softmax restricted to each row's kNN — E_2 was 98.6%
+#       rank-1 (row cosine 0.981), now 9.0% / 0.078.
+#     • k_neighbors 20 -> 8 (config/model/radartaco_gnn.yaml).
+#   Fusion
+#     • null key/value per attention block, so a pixel can answer "no radar
+#       applies to me" instead of spending full mass on some radar point.
+#     • a_pix floored at one feature column — 52.6% of radar points matched no
+#       column at f6 before.
+#     • LayerNorm on the kv stream (queries were normalised, kv was not).
+#
+# Baseline to beat: output/shape_lidar_grad_shape_edge_res (val MAE 1.7855 m
+# on the 24-sample diagnostic subset; use the full val split for the real
+# number).
+#
+# Diagnostics to re-measure after training — see the fix commit message for
+# the "before" values:
+#   ||attn_out|| match/no-match ratio (node3)   1.031  -> target > 1.5
+#   single radar point +3 m -> its column       0.0075 -> target > 0.3 m
+#   all radar +3 m transfer rate                4.7%   -> target > 30%
+#   N_1 ablation MAE rise                       0.0003 -> target > 0.03 m
+#   E_l ablation MAE rise                       0.0147 -> target > 0.05 m
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+
+wandb:
+  name: shape_lidar_grad_shape_edge_res_fix
+  tags: [shape-loss, dense-gt-edge-res, grad-shape, log-depth, radar-path-fix]
+  notes: >
+    Re-run of shape_lidar_grad_shape_edge_res against the fixed radar path
+    (GNN BN masking, kNN locality + safety, edge kNN mask, attention null
+    token, a_pix floor, kv LayerNorm). Loss and schedule unchanged, so the
+    delta against the original run is attributable to the code fixes.

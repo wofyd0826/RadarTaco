@@ -1,0 +1,43 @@
+# @package _global_
+# shape_lidar variant — dense_gt = depth_edge_res
+#   (GPU edge-aware residual interp, depth-guided, σ_s=20, σ_r=1.0, K=200,
+#    + A+C valid-mask handling; built by
+#    scripts/build_dense_gt_edge_residual.py).
+#
+# Train-set MAE vs depth_lidar @ {50, 70, 80} m = {0.797, 0.961, 1.001} m
+# Val-set    MAE vs depth_lidar @ {50, 70, 80} m = {0.791, 0.964, 1.009} m
+# RMSE ≈ 4.5–5.1 m (driven by dynamic-object / occlusion outliers).
+#
+# Loss formula (same as shape_lidar.yaml):
+#   L = w_lidar · L1(pred, depth_lidar)
+#     + lam · L1(pred, depth_dense)                                (off)
+#     + w_shape_global · AffineInvariantL1(pred, depth_dense)
+#     + w_shape_grid   · AffineInvariantBlockGridL1(pred, depth_dense, K=8)
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_shape_global: 1.0
+  w_shape_grid: 1.0
+  shape_align_resolution: 32
+  shape_grid_K: 8
+  shape_grid_align_resolution: 16
+  shape_trunc: 1.0
+  shape_grid_min_inliers: 30
+
+wandb:
+  name: shape_lidar_edge_res
+  tags: [shape-loss, dense-gt-edge-res, lidar-anchor, moge-style]
+  notes: >
+    Shape (affine-invariant L1, global + K=8 block grid) from depth_edge_res
+    (GPU edge-aware residual interp, B(σ_s=20, σ_r=1, depth-guided, A+C));
+    metric anchor (L1) from sparse depth_lidar. Same loss config as
+    shape_lidar.yaml — only the dense GT source differs.

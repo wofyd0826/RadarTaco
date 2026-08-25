@@ -1,0 +1,39 @@
+# RadarTaco MoE v4c + DPT-style router using ALL 6 image encoder layers.
+#
+# Same as radartaco_moe_v4c_dpt EXCEPT `moe_router_dpt_source_layers`
+# spans F1..F6 (indices 0..5) instead of just F3..F6.
+#
+# Trade-off vs the 4-layer default:
+#   + more fine-grained cues (F1 stride 1/2, F2 stride 1/4) reach the
+#     router — potentially helpful for near-field routing where texture
+#     dominates the routing decision.
+#   + longer fusion cascade (6 blocks vs 4) may model more hierarchy.
+#   – F1 projection is expensive (7.5M pixels at 384×1216) — measurably
+#     slower forward per step.
+#   – shallow features may be less discriminative for a coarse 3-way
+#     bin decision than mid/deep features already are.
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 8
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+
+# ── MoE options ──
+moe_at_l: [2]
+moe_n_experts: 3
+moe_use_shared: false
+moe_top_k: 2
+moe_stage: 2
+moe_bins: [0.0, 20.0, 50.0, 100.0]
+moe_router_arch: dpt
+moe_router_dpt_source_layers: [0, 1, 2, 3, 4, 5]  # F1..F6 (all)
+moe_router_dpt_fusion_ch: 128
+moe_expert_ch_ratio: 0.5
+moe_router_gt_type: soft

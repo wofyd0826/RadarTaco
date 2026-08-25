@@ -1,4 +1,7 @@
-# Paper Eq. 5 — L1 against sparse LiDAR + λ·L1 against dense GT.
+# Paper Eq. 5 — w_lidar·L1 against sparse LiDAR + λ·L1 against dense GT.
+# Set w_lidar=0 to drop the sparse-LiDAR term entirely (e.g. when the
+# dense GT is itself ROE-aligned to LiDAR, like depth_refined_grid).
+w_lidar: 1.0
 lam: 1.0
 w_smooth: 0.0
 w_sim_grad: 0.0
@@ -8,3 +11,172 @@ w_multi_scale: 0.0
 multi_scale_per_level_weights: null     # null = uniform across scales
 smoothness_rgb_grad_weight: 1.0
 grad_scales: 4
+
+# MoGe-2-style affine-invariant shape supervision on the dense GT
+# (depth_gt_dense, set via dataset.dense_gt_dir). The model's depth is
+# (scale, shift)-aligned to the dense GT via the ROE truncated-L1 solver
+# BEFORE computing L1 — so per-image metric scale is free, only per-pixel
+# shape is supervised. Pair with `w_lidar > 0` to anchor metric scale
+# from sparse LiDAR.
+#
+#   w_shape_global > 0   →  single per-image (scale, shift) ROE fit
+#   w_shape_grid   > 0   →  K×K block-grid, per-block ROE fit
+#
+# Defaults below are 0 (no behavior change vs paper Eq.5).
+w_shape_global: 0.0
+w_shape_grid: 0.0
+shape_align_resolution: 32           # downsample for global ROE fit (speed)
+shape_grid_K: 8                      # block partition for grid ROE fit
+shape_grid_align_resolution: 16      # per-block downsample BEFORE the ROE solve;
+                                     # bounds anchor memory to ~200 MB at B=12.
+shape_trunc: 1.0                     # ROE truncation (MoGe-2 default)
+shape_grid_min_inliers: 30           # fall back to identity for sparse blocks
+# Per-block / per-image (scale, shift) sanity bounds. ROE's closed-form
+# can explode when a block has near-uniform pred/target. Blocks where the
+# fitted (s, b) lies outside these bounds are dropped from the loss.
+shape_scale_min: 0.1
+shape_scale_max: 10.0
+shape_shift_max_abs: 100.0
+
+# LiDAR-anchored shape losses. Same affine-invariant L1 structure as the
+# `w_shape_*` terms above, but the (scale, shift) is solved on
+# (pred, depth_gt_lidar) over the LiDAR mask — locking the affine to
+# LiDAR's metric — while the L1 residual is taken against dense_gt over
+# the dense mask. Combined with `w_affine_anchor` (penalty pulling
+# (a, b) → (1, 0)), this lets you reduce `w_lidar` toward 0 while
+# keeping the model metric-consistent with both LiDAR and dense_gt —
+# i.e. the per-pixel hard L1 constraint that drives the stripe artifact
+# at LiDAR rows can be softened or removed.
+#
+#   w_anchored_global > 0    →  single per-image (a, b) ROE fit
+#                              on (pred, lidar) over LiDAR mask, L1 vs dense
+#   w_anchored_grid   > 0    →  K×K block-grid version
+#   w_affine_anchor   > 0    →  (a-1)² + b² penalty on the fitted affines
+w_anchored_global: 0.0
+w_anchored_grid: 0.0
+# w_affine_anchor uses the (a, b) solved on (pred, LiDAR) — NOT on
+# (pred, dense_gt) — so the anchor pulls metric toward LiDAR's true
+# scale (not dense_gt's approximate one). Set > 0 to activate even
+# when both `w_anchored_*` are 0 (penalty-only mode).
+w_affine_anchor: 0.0
+# Min LiDAR pixels required to actually fit the affine. Blocks/images
+# below the threshold fall back to identity (no loss, no anchor penalty).
+anchored_min_lidar_inliers_global: 30
+anchored_min_lidar_inliers_block: 8
+
+# Drop LiDAR pixels from the sparse-LiDAR L1 term when |dense_gt − lidar|
+# exceeds this threshold (meters). Per the dense-vs-lidar diagnostic
+# (Spearman ρ ≈ 0.88 between |dense-lidar| and pred vertical jump),
+# these are exactly the rows where the per-pixel hard L1 fight with
+# the shape loss produces stripes. Default 0 = disabled.
+lidar_consistency_threshold: 0.0
+
+# Anti-stripe loss: RGB-guided vertical-only smoothness that directly
+# suppresses |∂pred/∂y| where RGB is flat (= unphysical jumps). By
+# default localized to LiDAR-row neighborhoods (where stripes form).
+# Does NOT touch L1_lidar or any shape supervision — fights the
+# *symptom* (∂y jump) without weakening the metric signal.
+#
+#   w_anti_stripe                — loss weight (set > 0 to activate)
+#   anti_stripe_gamma            — exp(-γ · |∂y rgb|) edge weighting
+#   anti_stripe_row_radius       — vertical dilation around LiDAR rows
+#   anti_stripe_near_lidar_only  — true: only near LiDAR rows; false: whole image
+w_anti_stripe: 0.0
+anti_stripe_gamma: 10.0
+anti_stripe_row_radius: 4
+# Whole image (False) by default — a stripe is "depth ∂y where RGB ∂y
+# is flat", an unphysical condition that does not depend on dense_gt
+# values. So the loss runs on the WHOLE image, including dense-invalid
+# regions (sky / ego / padding) where stripes can still form (e.g. when
+# LiDAR beams reach the sky). Set true to restrict to LiDAR-row
+# neighbourhoods (legacy behaviour, less generic).
+anti_stripe_near_lidar_only: false
+# normalize_by_mean=false → raw |∂y pred| in meters (≈ 0.3 m on nuScenes,
+# comparable to shape_loss magnitude). normalize_by_mean=true → ÷mean depth,
+# scale-invariant but ~50× smaller — would need a much larger w_anti_stripe.
+anti_stripe_normalize_by_mean: false
+
+# Gradient-only shape loss: L1 on *log-depth* gradients vs dense_gt.
+# Completely scale-invariant — gradients of log(c·D) and log(D) are
+# identical — so this loss does NOT compete with L1_lidar over the
+# absolute metric. Drop-in alternative to AffineInvariantL1Loss when
+# the dense_gt's absolute values are unreliable but its shape is good.
+#
+#   w_grad_shape         — loss weight (set > 0 to activate)
+#   grad_shape_scales    — MiDaS-style multi-scale (4 = 1/1, 1/2, 1/4, 1/8)
+#   grad_shape_use_log   — true: log-depth grads (scale-invariant);
+#                          false: raw-depth grads (couples to scale)
+w_grad_shape: 0.0
+grad_shape_scales: 4
+grad_shape_use_log: true
+# Per-scale weights for the multi-scale loss. List of `grad_shape_scales`
+# floats (e.g. [4, 2, 1, 1]), or null = uniform (= mean across scales).
+# Renormalised internally to sum to 1, so only relative ratios matter.
+# Example: [0.6, 0.2, 0.1, 0.1] emphasises 1/1 (fine detail).
+grad_shape_per_scale_weights: null
+# Soft truncation (robust loss) — per-pixel residuals
+# |∂log pred − ∂log target| are clamped to this value BEFORE the average.
+# Caps the influence of outlier pixels (regions where dense_gt is least
+# reliable — typically mid-range on DAv2-derived GT). null = disabled.
+# trunc=1.0 → depth ratio differences > e (~2.7×) all contribute equally,
+# matching MoGe's ROE truncation default.
+grad_shape_trunc: null
+
+# LiDAR-conditioned shape mask: only supervise grad_shape on pixels
+# within `dilate` px of a LiDAR point that agrees with dense_gt within
+# `threshold` m. Restricts shape supervision to verifiably correct
+# regions; conflict pixels (where DAv2 disagrees with LiDAR) are
+# excluded. 0 = disabled (default — full image, original grad_shape).
+grad_shape_consistency_threshold: 0.0
+grad_shape_consistency_dilate: 8
+
+# LiDAR-ALIGNED block-grad shape: per K×K block, dense_gt is ROE-aligned
+# to LiDAR BEFORE computing log-grad L1 against pred. Block-local DAv2
+# ratio errors are absorbed by per-block (s, b) before they reach the
+# supervision target. Drop-in alternative to grad_shape when DAv2's
+# absolute ratios are unreliable but block-local ROE alignment is OK.
+#   w_grad_shape_aligned                 — loss weight
+#   grad_shape_aligned_K                 — block grid size (8 = 64 blocks)
+#   grad_shape_aligned_scales            — multi-scale (4)
+#   grad_shape_aligned_use_log           — log-domain (true)
+#   grad_shape_aligned_trunc             — per-residual soft trunc (null)
+#   grad_shape_aligned_roe_trunc         — ROE solver truncation (1.0)
+#   grad_shape_aligned_min_lidar_inliers — fallback if block has < N LiDAR (8)
+#   grad_shape_aligned_align_resolution  — ROE downsample per block (16)
+w_grad_shape_aligned: 0.0
+grad_shape_aligned_K: 8
+grad_shape_aligned_scales: 4
+grad_shape_aligned_use_log: true
+grad_shape_aligned_trunc: null
+grad_shape_aligned_roe_trunc: 1.0
+grad_shape_aligned_min_lidar_inliers: 8
+grad_shape_aligned_align_resolution: 16
+
+# Gradient-SIGN loss: multi-scale, |gt|-weighted hinge on the sign of
+# ∂log target vs ∂log pred. Enforces neighbor ordering (= same gradient
+# direction) but leaves the gradient MAGNITUDE free — DAv2-derived
+# dense_gt's reliable ordering is learned, its noisy absolute ratios
+# are NOT. Can be combined with `w_grad_shape > 0` for a soft
+# magnitude prior on top (hybrid).
+#
+#   w_grad_sign        — loss weight (set > 0 to activate)
+#   grad_sign_scales   — multi-scale (4 = 1/1, 1/2, 1/4, 1/8)
+#   grad_sign_use_log  — true: log-depth (scale-invariant, recommended)
+w_grad_sign: 0.0
+grad_sign_scales: 4
+grad_sign_use_log: true
+grad_sign_per_scale_weights: null      # null = uniform; see grad_shape_per_scale_weights
+
+# Gradient-COSINE loss: enforces (∂x, ∂y) VECTOR direction agreement
+# between pred and dense_gt via cosine similarity. Same intent as
+# grad_sign (DAv2's ordering, not its noisy ratios) but richer
+# (vector angle, not just per-axis sign) and with natural raw
+# magnitude in [0, 2] — no need for weights in the thousands.
+#
+#   w_grad_cos        — loss weight (set > 0 to activate)
+#   grad_cos_scales   — multi-scale (4 = 1/1, 1/2, 1/4, 1/8)
+#   grad_cos_use_log  — true: log-depth (scale-invariant)
+w_grad_cos: 0.0
+grad_cos_scales: 4
+grad_cos_use_log: true
+grad_cos_per_scale_weights: null       # null = uniform; see grad_shape_per_scale_weights

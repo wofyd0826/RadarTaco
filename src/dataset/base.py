@@ -49,6 +49,11 @@ class BaseRadarDepthDataset(Dataset, ABC):
         max_radar_points: int = 128,
         resize_to_hw: Optional[Tuple[int, int]] = None,
         crop_to_hw: Optional[Tuple[int, int]] = None,
+        crop_resize_back: bool = False,
+        # When True and crop_to_hw is set, _apply_random_crop crops the
+        # sample to crop_to_hw, then resizes it back to the pre-crop
+        # (H, W). Scale-jitter augmentation: same output shape, varied
+        # zoom / centre. Depth values are unchanged (metric).
         max_depth: float = 100.0,
         min_depth: float = 1e-3,
         augmentation: bool = True,
@@ -71,6 +76,7 @@ class BaseRadarDepthDataset(Dataset, ABC):
         self.max_radar_points = max_radar_points
         self.resize_to_hw = tuple(resize_to_hw) if resize_to_hw else None
         self.crop_to_hw = tuple(crop_to_hw) if crop_to_hw else None
+        self.crop_resize_back = bool(crop_resize_back)
         self.max_depth = max_depth
         self.min_depth = min_depth
         self.augmentation = augmentation
@@ -237,6 +243,36 @@ class BaseRadarDepthDataset(Dataset, ABC):
             radar[~in_bounds] = 0.0
             sample["radar_points"] = radar
             sample["radar_mask"] = in_bounds
+
+        # Optional: resize the cropped sample back to the original (H, W)
+        # to act as scale-jitter augmentation. RGB / rel_depth: bilinear
+        # (dense); depth GTs / masks: NEAREST_EXACT (sparse / boolean).
+        if self.crop_resize_back:
+            scale_y = H / target_h
+            scale_x = W / target_w
+            sample["rgb_norm"] = tv_resize(
+                sample["rgb_norm"], [H, W],
+                interpolation=InterpolationMode.BILINEAR, antialias=True,
+            )
+            for key in ("depth_gt_lidar", "depth_gt_dense"):
+                sample[key] = tv_resize(
+                    sample[key], [H, W],
+                    interpolation=InterpolationMode.NEAREST_EXACT)
+            for key in ("valid_mask_lidar", "valid_mask_dense"):
+                sample[key] = tv_resize(
+                    sample[key].float(), [H, W],
+                    interpolation=InterpolationMode.NEAREST_EXACT).bool()
+            if "rel_depth" in sample:
+                sample["rel_depth"] = tv_resize(
+                    sample["rel_depth"], [H, W],
+                    interpolation=InterpolationMode.BILINEAR, antialias=True,
+                )
+            radar = sample["radar_points"]
+            m = sample["radar_mask"]
+            if m.any():
+                radar[m, CH_XPIX] *= scale_x
+                radar[m, CH_YPIX] *= scale_y
+                sample["radar_points"] = radar
         return sample
 
     def _apply_augmentation(self, sample: Dict) -> Dict:

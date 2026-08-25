@@ -34,6 +34,7 @@ class NuScenesRadarDepthDataset(BaseRadarDepthDataset):
         data_root: str,
         split_file: str,
         dense_gt_dir: str = "depth_acc",
+        lidar_gt_dir: str = "depth_lidar",
         radar_3d_dir: str = "radar_3d",
         night_ids_file: Optional[str] = None,
         rel_depth_dir: Optional[str] = None,
@@ -41,6 +42,10 @@ class NuScenesRadarDepthDataset(BaseRadarDepthDataset):
     ):
         """
         Args:
+            lidar_gt_dir: subdir under data_root for the sparse LiDAR
+                supervision target (depth_gt_lidar). Default "depth_lidar"
+                = raw single-frame projection. Set to "depth_lidar_filled"
+                to use the residual-fill variant.
             dense_gt_dir: subdir under data_root for dense GT (`Dacc` source).
                 "depth_acc"    = paper-faithful sparse 80+80 accumulated (default).
                 "depth_interp" = Delaunay-interpolated dense (alternative).
@@ -58,6 +63,7 @@ class NuScenesRadarDepthDataset(BaseRadarDepthDataset):
         super().__init__(**kwargs)
         self.data_root = data_root
         self.dense_gt_dir = dense_gt_dir
+        self.lidar_gt_dir = lidar_gt_dir
         self.radar_3d_dir = radar_3d_dir
         self.rel_depth_dir = rel_depth_dir
         self.samples = self._load_split(split_file)
@@ -141,8 +147,8 @@ class NuScenesRadarDepthDataset(BaseRadarDepthDataset):
                 radar_points = expand_to_6ch(pts3, NUSCENES_CAM_FRONT_INTRINSIC)
         radar_points_t, radar_mask = self._pad_radar_points(radar_points)
 
-        # Sparse LiDAR depth
-        d_lidar_path = os.path.join(self.data_root, "depth_lidar", f"{sub}.png")
+        # Sparse LiDAR depth (or residual-filled variant when configured)
+        d_lidar_path = os.path.join(self.data_root, self.lidar_gt_dir, f"{sub}.png")
         d_lidar = np.asarray(Image.open(d_lidar_path), dtype=np.float32) / 256.0
         depth_gt_lidar, valid_mask_lidar = self._make_depth_tensor(d_lidar)
 

@@ -1,0 +1,72 @@
+# @package _global_
+# MoE v4c stage-1 (teacher forcing) — warm-start from full-dim baseline.
+#
+# Same architecture as radartaco_moe_stage1_v4c. Only difference:
+# `load_weights_from` points at an ADAPTED baseline checkpoint where
+# `shape_lidar_grad_shape_edge_res_fix/best.pt`'s L2 fusion block has been
+# CLONED into each of v4c's 3 halved experts via first-C_ex truncation.
+#
+# Pre-run:
+#     python tests/adapt_baseline_to_v4c.py \
+#         --baseline output/shape_lidar_grad_shape_edge_res_fix/best.pt \
+#         --out      output/baseline_adapted_v4c.pt
+#
+# What each part of v4c starts with:
+#   • image_encoder / radar encoder / L0-L1 fusion / decoder — baseline
+#   • L2 experts (block.*) — baseline L2 fusion, truncated to C_ex=256
+#   • L2 proj_in / proj_out — RANDOM (halving adapters have no analogue)
+#   • L2 router — RANDOM (learned from scratch)
+#
+# Rationale:
+#   • Baseline is already a converged depth predictor; L2 experts inherit
+#     its fusion knowledge rather than starting cold.
+#   • Router is what we WANT to learn — random init is intentional.
+#   • Warm-start should let stage-1 focus training capacity on
+#     router + halving adapters, not re-learning fusion.
+defaults:
+  - override /model: radartaco_moe_v4c
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 1
+  moe_use_shared: false
+  moe_top_k: 2
+  moe_expert_ch_ratio: 0.5
+  moe_router_gt_type: soft
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 10.0
+
+training:
+  epochs: 30
+  load_weights_from: output/baseline_adapted_v4c.pt
+  # No carry_schedule — this is a fresh training run with LR at initial.
+
+wandb:
+  name: radartaco_moe_stage1_v4c_warmbase
+  tags: [moe, stage1, teacher-forcing, no-shared, router-mlp3x3, top_k2, expert-ratio-half, soft-ce, warm-baseline, v4c_warmbase]
+  notes: >
+    Stage-1 v4c warm-started from shape_lidar_grad_shape_edge_res_fix.
+    Baseline L2 fusion CLONED into each of the 3 experts (truncated to
+    halved dim). proj_in/proj_out/router random-init. Aims to skip the
+    "fusion re-learning" phase and let stage-1 spend its epochs on the
+    router + halving adapters.

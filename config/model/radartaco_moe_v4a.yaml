@@ -1,0 +1,44 @@
+# RadarTaco MoE v4a — Option A: top_k=2 with active-params-matched experts.
+#
+# What changes vs v3:
+#   • moe_top_k          : 1 → 2       (dual expert routing per token)
+#   • moe_expert_ch_ratio: 1.0 → 0.5   (halve each expert's internal channel dim)
+#
+# Motivation (from perfect_soft ablation + Phase-1 top2-eval failure):
+#   • top_k=1 collapses the gate to a constant → task loss cannot reach the
+#     router. CE-only training tops out at ~90% accuracy irrespective of
+#     router capacity or epoch count.
+#   • Switching the FORWARD to top_k=2 on a model trained at top_k=1 hurts
+#     (dilution of uncertain-but-correct pure tokens). Router must be
+#     TRAINED at top_k=2 so it learns to be confident when correct and
+#     spread only when genuinely uncertain.
+#   • Halving each expert to ~0.5× keeps ACTIVE params/token roughly
+#     matched to the top_k=1 baseline: 2 halved experts (~1.57M active) vs
+#     1 full expert (~2.1M active). Total model params drop; peak compute
+#     rises slightly due to the second expert's dispatch.
+#
+# Router GT format stays HARD (majority-vote argmax); Option C sibling
+# `radartaco_moe_v4c` swaps this for SOFT (pixel-bin fraction).
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 8
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+
+# ── MoE options ──
+moe_at_l: [2]
+moe_n_experts: 3
+moe_use_shared: false
+moe_top_k: 2                  # ← v4a: task-loss-enabled routing
+moe_stage: 2
+moe_bins: [0.0, 20.0, 50.0, 100.0]
+moe_router_arch: mlp3x3
+moe_expert_ch_ratio: 0.5      # ← v4a: halved experts (active params ≈ matched)
+moe_router_gt_type: hard      # majority-vote target for router CE

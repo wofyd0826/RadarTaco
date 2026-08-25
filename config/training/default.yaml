@@ -7,6 +7,18 @@ lr_decay_step: 10
 lr_decay_amount: 1.0e-5
 weight_decay: 0.0
 amp: true
+# float16 needs a loss scaler, and this loss family overflows it: with
+# w_grad_shape=100 some intermediate gradients spike, GradScaler halves the
+# scale on every overflow but only doubles after 2000 clean steps, so it
+# spirals down until 1/scale is inf and everything turns NaN. Measured on
+# shape_lidar_grad_shape_edge_res_fix, 400 steps from the same weights:
+#   float16  : 45 overflow skips, scale -> 1.9e-09, loss 5.38 -> 6.94
+#   bfloat16 :  0 overflow skips,                  loss 5.52 -> 5.31
+# bfloat16 has fp32's exponent range so no scaling is involved. Needs Ampere
+# or newer; set back to float16 on older GPUs and watch min_grad_scale.
+amp_dtype: bfloat16          # 'float16' | 'bfloat16'
+nonfinite_patience: 25       # consecutive non-finite losses before aborting
+min_grad_scale: 1.0          # abort if the fp16 scaler collapses below this
 seed: 42
 log_interval: 50
 val_subset_size: 1000

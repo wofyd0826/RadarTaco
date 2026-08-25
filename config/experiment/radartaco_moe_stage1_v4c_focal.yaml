@@ -1,0 +1,62 @@
+# @package _global_
+# MoE v4c stage-1 (teacher forcing) — v4c + Focal Loss on router CE.
+#
+# Identical to radartaco_moe_stage1_v4c except router CE is replaced by
+# focal loss (γ=2.0, per-class variant compatible with soft targets):
+#     L = -Σ_k (1 - p[k])^γ · target[k] · log softmax(logits)[k]
+#
+# Rationale (from v4c misroute analysis):
+#   • CORRECT 92% already at max_prob 0.954 (saturated) → standard CE
+#     mostly grads on easy sample.
+#   • BADLY misrouted 1.6% are PURE tokens (bound=0.09) with max_prob
+#     ~0.72 confidence and 15+m dist error → focal boosts their gradient
+#     by (1-0.2)^2 = 0.64x scale while shrinking easy sample grads by
+#     (1-0.95)^2 = 0.0025x. Net effect: ~256x relative attention shift
+#     toward hard tokens.
+defaults:
+  - override /model: radartaco_moe_v4c
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 1
+  moe_use_shared: false
+  moe_top_k: 2
+  moe_expert_ch_ratio: 0.5
+  moe_router_gt_type: soft
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  # Focal drastically shrinks the mean CE magnitude (~0.6x for γ=2 in the
+  # baseline regime), so bump w_router to keep effective scale near the
+  # v4c baseline. w_router * 15 ≈ v4c * 10 in wall-clock CE mag.
+  w_router: 15.0
+  router_focal_gamma: 2.0
+
+training:
+  epochs: 30
+
+wandb:
+  name: radartaco_moe_stage1_v4c_focal
+  tags: [moe, stage1, teacher-forcing, no-shared, router-mlp3x3, top_k2, expert-ratio-half, soft-ce, focal, v4c_focal]
+  notes: >
+    Stage-1 v4c with focal-loss router CE (γ=2). Per-class focal on soft
+    target. Directly targets the "PURE token, confidently wrong" BADLY
+    misrouted group (n=86K, 20% of recoverable gap).

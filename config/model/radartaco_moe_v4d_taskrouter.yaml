@@ -1,0 +1,49 @@
+# RadarTaco MoE v4d_taskrouter — v4c + task-aware router loss.
+#
+# Same as v4c (no shared, top_k=2, halved experts, soft router CE) except
+# `moe_per_spec_aux: true`. During training, model produces K=3 extra
+# depth predictions (one per specialist, gate forced one-hot on that spec,
+# no shared). ComposedLoss consumes these via `w_task_router` to compute
+# the task-aware router loss: per-token per-spec LiDAR L1 error becomes a
+# softmax(-err/T) soft target the router is pushed to match.
+#
+# Rationale (see `analyze_expert_out_of_bin_penalty_v6c`):
+#   - Out-of-bin specialist error is MASSIVE (spec_near on far pixel = 22.8m,
+#     32.5x its in-bin MAE 0.7m). Adjacent-bin misroutes also expensive.
+#   - Router misroute rate is 9%, but current router only learns pixel-bin
+#     classification (soft CE), not "which spec is actually best per token".
+#   - Task-aware router loss adds direct supervision that pushes probs
+#     toward whichever specialist would minimize actual task loss on this
+#     token — cleaner alignment between router objective and end task.
+#
+# Extra training cost: K = 3 additional decoder passes per step; only the
+# L=2 MoE blocks re-run (L=0/1 fusion is reused from main forward).
+# Total decoder passes during training: 1 (main) + 3 (per-spec) = 4.
+#
+# Inference: unchanged from v4c — no per-spec forwards, no shared.
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 8
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+
+# ── MoE options ──
+moe_at_l: [2]
+moe_n_experts: 3
+moe_use_shared: false
+moe_top_k: 2
+moe_stage: 2
+moe_bins: [0.0, 20.0, 50.0, 100.0]
+moe_router_arch: mlp3x3
+moe_expert_ch_ratio: 0.5
+moe_router_gt_type: soft
+
+# NEW: enable per-specialist "what-if" depth heads for task-aware router loss.
+moe_per_spec_aux: true

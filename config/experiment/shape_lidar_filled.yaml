@@ -1,0 +1,46 @@
+# @package _global_
+# Same as shape_lidar.yaml, but the sparse-LiDAR supervision target is
+# replaced by `depth_lidar_filled` — each LiDAR point's residual against
+# depth_refined_grid is propagated to a 20-px neighborhood, then pixels
+# outside the band are zeroed out. The intent is to keep LiDAR's metric
+# anchor at exact LiDAR pixels while diluting per-beam range bias over
+# many more nearby pixels → fewer stripes in pred.
+#
+#   L = w_lidar · L1(pred, depth_lidar_filled)                         ← metric anchor
+#     + w_shape_global · AffineInvariantL1(pred, depth_refined_grid)   ← global shape
+#     + w_shape_grid   · AffineInvariantBlockGridL1(pred, depth_refined_grid, K=8)
+#
+# Build the GT first:
+#   bash scripts/build_lidar_filled_all.sh
+#
+# Eval is evaluated against canonical `depth_lidar` (see eval.py) so
+# this run is directly comparable with vanilla shape_lidar.
+defaults:
+  - override /model: radartaco_gnn
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss: default
+
+dataset:
+  dense_gt_dir: depth_refined_grid
+  lidar_gt_dir: depth_lidar_filled
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_shape_global: 1.0
+  w_shape_grid: 1.0
+  shape_align_resolution: 32
+  shape_grid_K: 8
+  shape_grid_align_resolution: 16
+  shape_trunc: 1.0
+  shape_grid_min_inliers: 30
+
+wandb:
+  name: shape_lidar_filled
+  tags: [shape-loss, dav2-roe-grid, lidar-anchor, lidar-filled, moge-style]
+  notes: >
+    shape_lidar variant with depth_lidar_filled as the L1 anchor.
+    Each LiDAR point's (lidar - dense_gt) residual is propagated to a
+    20-px Voronoi cell, outside the band the supervision is masked
+    (value = 0). Goal: same metric anchor accuracy, fewer stripes.

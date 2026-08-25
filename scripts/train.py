@@ -26,9 +26,26 @@ import logging
 import os
 import sys
 
+# Cap BLAS/OpenMP threadpools BEFORE importing torch — otherwise MKL/OpenMP
+# spawn threads based on nproc (host = 192) even though the container's
+# cpu.max quota is much smaller (~12 cores here). Result: 100+ threads
+# competing for a dozen cores → context-switch overhead and cache thrash.
+# Env vars set via shell still take precedence (setdefault). Adjust via
+# `OMP_NUM_THREADS=8 python scripts/train.py ...` when running solo on a
+# fatter quota. Also see torch.set_num_threads() below (runtime cap).
+_DEFAULT_INTRA_THREADS = "4"
+for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+             "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_var, _DEFAULT_INTRA_THREADS)
+
 import hydra
 import torch
 from omegaconf import DictConfig, OmegaConf
+
+# PyTorch intra-op (BLAS/CPU tensor ops) and inter-op (independent op
+# execution) thread pools — matches the env-var caps above.
+torch.set_num_threads(int(os.environ["OMP_NUM_THREADS"]))
+torch.set_num_interop_threads(2)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -67,6 +84,28 @@ def _build_model(cfg, max_depth: float, max_radar_points: int):
         multi_scale=bool(cfg.model.get("multi_scale", False)),
         multi_scale_levels=tuple(cfg.model.get("multi_scale_levels", (2, 4, 8, 16))),
         use_aux_branch=bool(cfg.model.get("use_aux_branch", False)),
+        moe_at_l=tuple(cfg.model.get("moe_at_l") or ()),
+        moe_n_experts=int(cfg.model.get("moe_n_experts", 3)),
+        moe_use_shared=bool(cfg.model.get("moe_use_shared", True)),
+        moe_top_k=(int(cfg.model.get("moe_top_k"))
+                   if cfg.model.get("moe_top_k") is not None else None),
+        moe_stage=int(cfg.model.get("moe_stage", 2)),
+        moe_bins=tuple(cfg.model.get("moe_bins", (0.0, 20.0, 50.0, 100.0))),
+        moe_router_arch=str(cfg.model.get("moe_router_arch", "conv1x1")),
+        moe_expert_ch_ratio=float(cfg.model.get("moe_expert_ch_ratio", 1.0)),
+        moe_router_gt_type=str(cfg.model.get("moe_router_gt_type", "hard")),
+        moe_overlap_bins=cfg.model.get("moe_overlap_bins", None),
+        moe_shared_gate_mode=str(cfg.model.get("moe_shared_gate_mode", "always_on")),
+        moe_shared_aux=bool(cfg.model.get("moe_shared_aux", False)),
+        moe_per_spec_aux=bool(cfg.model.get("moe_per_spec_aux", False)),
+        moe_router_dpt_source_layers=(
+            tuple(cfg.model.get("moe_router_dpt_source_layers"))
+            if cfg.model.get("moe_router_dpt_source_layers") is not None else None),
+        moe_router_dpt_fusion_ch=int(cfg.model.get("moe_router_dpt_fusion_ch", 128)),
+        moe_pre_fusion_enabled=bool(cfg.model.get("moe_pre_fusion_enabled", False)),
+        moe_pre_fusion_feed_experts=bool(cfg.model.get("moe_pre_fusion_feed_experts", False)),
+        moe_pre_fusion_ch_ratio=float(cfg.model.get("moe_pre_fusion_ch_ratio", 1.0)),
+        moe_pre_fusion_router_detach=bool(cfg.model.get("moe_pre_fusion_router_detach", False)),
     )
 from src.util.loaders import build_loaders, build_viz_sampler                # noqa: E402
 from src.util.seeds import set_seed                                          # noqa: E402
@@ -82,6 +121,15 @@ def _resolve_output_dir(cfg) -> str:
     name = (cfg.wandb.get("name") if cfg.get("wandb") else None) \
         or _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     candidate = os.path.join(base, name)
+    # Resume path: if the caller passed a ckpt whose parent directory matches
+    # the candidate output dir, reuse it in place instead of forking to _2.
+    # Guards against silently splitting a resumed run across two folders.
+    resume_from = cfg.training.get("resume_from")
+    if resume_from:
+        parent = os.path.dirname(os.path.abspath(resume_from))
+        if os.path.abspath(candidate) == parent:
+            os.makedirs(candidate, exist_ok=True)
+            return candidate
     out = candidate
     i = 2
     while os.path.exists(out):
@@ -129,9 +177,48 @@ def main(cfg: DictConfig) -> None:
                                viz_sampler=viz_sampler,
                                val_loaders_extra=val_loaders_extra)
     if cfg.training.get("load_weights_from"):
-        trainer.load_checkpoint(cfg.training.load_weights_from, weights_only=True)
+        trainer.load_checkpoint(
+            cfg.training.load_weights_from,
+            weights_only=True,
+            carry_schedule=bool(cfg.training.get("load_weights_carry_schedule", False)),
+        )
     if cfg.training.get("resume_from"):
         trainer.load_checkpoint(cfg.training.resume_from, weights_only=False)
+
+    # Optional module freezing (fusion-only specialist experiments).
+    # `training.freeze_modules` is a list of top-level attribute names on the
+    # model to freeze (requires_grad=False + eval mode). Optimizer is rebuilt
+    # over the remaining trainable params only.
+    freeze_list = cfg.training.get("freeze_modules") or []
+    if freeze_list:
+        import types
+        # Override .train() to be a no-op that keeps the module in eval mode.
+        # Needed because trainer calls model.train() each epoch, which would
+        # otherwise re-enable BatchNorm running-stat updates on frozen submodules.
+        def _keep_eval(self, mode: bool = True):
+            return torch.nn.Module.train(self, False)
+        n_frozen = 0
+        for mod_name in freeze_list:
+            # Dotted paths supported (e.g., "radar_fusion.node_blocks.0").
+            try:
+                mod = model.get_submodule(mod_name)
+            except AttributeError:
+                logger.warning(f"freeze_modules: '{mod_name}' not found on model, skipping.")
+                continue
+            for p in mod.parameters():
+                p.requires_grad = False
+                n_frozen += p.numel()
+            mod.eval()
+            mod.train = types.MethodType(_keep_eval, mod)
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        n_train = sum(p.numel() for p in trainable)
+        logger.info(f"Froze {'+'.join(freeze_list)}: {n_frozen/1e6:.2f}M frozen, "
+                    f"{n_train/1e6:.2f}M trainable")
+        trainer.optimizer = torch.optim.Adam(
+            trainable,
+            lr=float(cfg.training.lr),
+            weight_decay=float(cfg.training.get("weight_decay", 0.0)),
+        )
 
     try:
         trainer.train()
