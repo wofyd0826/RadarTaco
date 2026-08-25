@@ -53,6 +53,21 @@ class RadarTaco(nn.Module):
         moe_stage: int = 2,
         moe_bins: Sequence[float] = (0.0, 20.0, 50.0, 100.0),
         moe_router_arch: str = "conv1x1",
+        moe_expert_ch_ratio: float = 1.0,
+        moe_router_gt_type: str = "hard",
+        moe_overlap_bins: Optional[Sequence[Sequence[float]]] = None,
+        moe_shared_gate_mode: str = "always_on",
+        moe_shared_aux: bool = False,
+        moe_per_spec_aux: bool = False,
+        # DPT-style multi-scale router options — used only when
+        # `moe_router_arch == "dpt"`. See DPTRouter for details.
+        moe_router_dpt_source_layers: Optional[Sequence[int]] = None,
+        moe_router_dpt_fusion_ch: int = 128,
+        # Two-stage pre-fusion MoE options.
+        moe_pre_fusion_enabled: bool = False,
+        moe_pre_fusion_feed_experts: bool = False,
+        moe_pre_fusion_ch_ratio: float = 1.0,
+        moe_pre_fusion_router_detach: bool = False,
     ) -> None:
         super().__init__()
         self.image_encoder = ImageEncoder(pretrained=pretrained_image_encoder)
@@ -68,7 +83,31 @@ class RadarTaco(nn.Module):
         self.moe_at_l = tuple(moe_at_l) if moe_at_l else ()
         self.moe_stage = int(moe_stage)
         self.moe_bins = tuple(float(x) for x in moe_bins)
+        self.moe_router_gt_type = str(moe_router_gt_type)
         assert len(self.moe_bins) >= 2, "moe_bins needs at least [lo, hi]"
+        self.moe_overlap_bins = (
+            tuple(tuple(float(x) for x in pair) for pair in moe_overlap_bins)
+            if moe_overlap_bins is not None else None
+        )
+        self.moe_shared_gate_mode = str(moe_shared_gate_mode)
+        # Enable auxiliary shared-only depth head during training. When True
+        # and MoE is on, `forward` also produces `depth_shared` — the depth
+        # predicted from the shared expert alone (no specialists). The loss
+        # can then supervise it directly (see `w_shared_aux` in ComposedLoss)
+        # to train the shared expert as a standalone generalist predictor,
+        # rather than as a residual correction on top of specialists.
+        self.moe_shared_aux = bool(moe_shared_aux)
+        # Enable per-specialist "what-if" depth heads during training. When
+        # True and MoE is on, `forward` also produces `depth_per_spec`
+        # (list of K depth predictions, each with the gate forced one-hot
+        # on one specialist). Consumed by ComposedLoss with `w_task_router`
+        # to compute a task-aware router loss: router probs are pushed to
+        # concentrate on whichever specialist would produce the LOWEST task
+        # loss on each token, rather than just matching pixel-bin majority.
+        # Adds K extra decoder passes per training step (K = n_experts).
+        self.moe_per_spec_aux = bool(moe_per_spec_aux)
+        # cache experts count for the forward loop below
+        self._moe_n_experts = int(moe_n_experts)
         self.radar_fusion = PyramidRadarFusion(
             radar_channels=radar_channels,
             img_channels=self.image_encoder.feat_channels,
@@ -81,6 +120,18 @@ class RadarTaco(nn.Module):
             moe_top_k=moe_top_k,
             moe_bins=self.moe_bins,
             moe_router_arch=str(moe_router_arch),
+            moe_expert_ch_ratio=float(moe_expert_ch_ratio),
+            moe_router_gt_type=self.moe_router_gt_type,
+            moe_overlap_bins=self.moe_overlap_bins,
+            moe_shared_gate_mode=self.moe_shared_gate_mode,
+            moe_router_dpt_source_layers=(
+                tuple(moe_router_dpt_source_layers)
+                if moe_router_dpt_source_layers is not None else None),
+            moe_router_dpt_fusion_ch=int(moe_router_dpt_fusion_ch),
+            moe_pre_fusion_enabled=bool(moe_pre_fusion_enabled),
+            moe_pre_fusion_feed_experts=bool(moe_pre_fusion_feed_experts),
+            moe_pre_fusion_ch_ratio=float(moe_pre_fusion_ch_ratio),
+            moe_pre_fusion_router_detach=bool(moe_pre_fusion_router_detach),
         )
         self.depth_decoder = DepthDecoder(
             feat_channels=self.image_encoder.feat_channels,
@@ -142,19 +193,75 @@ class RadarTaco(nn.Module):
         # Result: stage-2 with w_router>0 now trains router via CE anchor,
         # solving the "router frozen after stage 1" issue caused by top_k=1
         # blocking task-loss gradient.
+        # `_oracle_eval` is an ATTRIBUTE (set on the module from outside, e.g.
+        # by the trainer's oracle-val pass) — treated like training for both
+        # gt_source (needs GT to compute router_gt) and teacher_force (drive
+        # gate from GT instead of router logits).
+        oracle_eval = bool(getattr(self, "_oracle_eval", False))
         gt_source = (depth_gt_dense
-                     if (self.moe_at_l and self.training
+                     if (self.moe_at_l and (self.training or oracle_eval)
                          and depth_gt_dense is not None)
                      else None)
-        teacher_force = (self.moe_stage == 1 and self.training)
+        teacher_force = (self.moe_stage == 1 and self.training) or oracle_eval
 
-        fused, router_logits, router_gts = self.radar_fusion(
-            feats, N_list, E_list,
-            radar_points, radar_mask, image_w=image_w,
-            depth_gt_dense=gt_source,
-            teacher_force=teacher_force,
-        )
+        # Auxiliary shared-only path: only during training and only when
+        # explicitly enabled + MoE is on. Adds a second depth-decoder pass
+        # on the shared-only fused features. Eval never runs it.
+        want_aux = (self.moe_shared_aux and self.training
+                    and bool(self.moe_at_l))
+        if want_aux:
+            fused, router_logits, router_gts, fused_shared = self.radar_fusion(
+                feats, N_list, E_list,
+                radar_points, radar_mask, image_w=image_w,
+                depth_gt_dense=gt_source,
+                teacher_force=teacher_force,
+                return_shared_only=True,
+                rel_depth=rel_depth,
+            )
+        else:
+            fused, router_logits, router_gts = self.radar_fusion(
+                feats, N_list, E_list,
+                radar_points, radar_mask, image_w=image_w,
+                depth_gt_dense=gt_source,
+                teacher_force=teacher_force,
+                rel_depth=rel_depth,
+            )
+            fused_shared = None
         depth = self.depth_decoder(fused, out_hw=rgb.shape[-2:])
+        depth_shared = (self.depth_decoder(fused_shared, out_hw=rgb.shape[-2:])
+                        if fused_shared is not None else None)
+
+        # Per-specialist depth predictions for task-aware router loss.
+        # Only during training, only in stage 2 (self-routing), with MoE
+        # enabled. Skipped in stage 1 because:
+        #   (a) gate is teacher-forced there, so router is trained
+        #       independently as a bin classifier — task_router loss
+        #       would fight that direct supervision.
+        #   (b) specialists are still early in training; per-spec errors
+        #       are dominated by initialization noise, not real
+        #       specialization → unreliable target for the router.
+        # Reuses cached `fused` for non-MoE levels; only re-runs the
+        # MoE-level blocks with the gate forced one-hot on each specialist
+        # (shared skipped). K extra decoder passes.
+        depth_per_spec: Optional[list] = None
+        if (self.moe_per_spec_aux and self.training and bool(self.moe_at_l)
+                and self.moe_stage == 2):
+            # Compute per-spec forwards inside no_grad. `depth_per_spec` is
+            # consumed ONLY for the task-aware router LOSS TARGET (also
+            # wrapped in no_grad in the loss), so gradient never flows back
+            # through these K decoder passes — saving activation memory
+            # equal to K decoder forwards worth.
+            depth_per_spec = []
+            with torch.no_grad():
+                for k in range(self._moe_n_experts):
+                    fused_k = self.radar_fusion.forward_per_spec(
+                        feats, N_list, E_list,
+                        radar_points, radar_mask, image_w=image_w,
+                        spec_idx=k, main_out=fused)
+                    depth_k = self.depth_decoder(fused_k, out_hw=rgb.shape[-2:])
+                    # Take top-res tensor if multi-scale dict returned.
+                    depth_per_spec.append(depth_k["depth"] if isinstance(depth_k, dict)
+                                           else depth_k)
 
         # If no MoE, keep legacy return type (Tensor or existing dict).
         if not router_logits:
@@ -166,5 +273,24 @@ class RadarTaco(nn.Module):
         # int64 in stage-1 or None in stage-2/eval.
         result = depth if isinstance(depth, dict) else {"depth": depth}
         result["router_logits"] = router_logits
+        # Emit router_gt_type so the loss can pick softmax-CE (hard/soft) or
+        # sigmoid-BCE (overlap) per bin. Included on every forward — loss
+        # only reads it when router_gts is non-None.
+        result["router_gt_type"] = self.moe_router_gt_type
         result["router_gts"] = router_gts
+        # Emit moe_bins so the loss can bucketize `depth` for self-distillation
+        # (target = pixel_fraction of the model's own final depth prediction).
+        result["moe_bins"] = self.moe_bins
+        if depth_shared is not None:
+            # Shared-only depth for the auxiliary task loss. If the main
+            # decoder returned a dict (multi-scale), only the top-res depth
+            # tensor is passed for aux — aux never supervises multi-scale.
+            result["depth_shared"] = (
+                depth_shared["depth"] if isinstance(depth_shared, dict)
+                else depth_shared)
+        if depth_per_spec is not None:
+            # List of K depth tensors, each (B, 1, H, W) — per-specialist
+            # "what-if" prediction with gate forced to that spec. Consumed
+            # by the task-aware router loss.
+            result["depth_per_spec"] = depth_per_spec
         return result

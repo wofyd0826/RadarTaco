@@ -65,6 +65,11 @@ class RadarTacoTrainer:
         self.global_step = 0
         self.best_metric = float("inf")
         self.start_epoch = 0
+        # LR schedule shift for warm-start-with-carried-schedule. Epoch used
+        # in the LR formula is (epoch + _lr_epoch_offset), so stage 2 picks
+        # the schedule up where stage 1 left off instead of resetting to the
+        # initial LR. Kept 0 by default; set by load_checkpoint(carry_schedule=True).
+        self._lr_epoch_offset = 0
         # Consecutive non-finite training losses tolerated before giving up.
         self._nonfinite_steps = 0
         self._nonfinite_patience = int(
@@ -76,7 +81,8 @@ class RadarTacoTrainer:
                 for k, v in batch.items()}
 
     def _adjust_lr(self, epoch: int) -> None:
-        n_decays = epoch // int(self.cfg.training.lr_decay_step)
+        effective_epoch = epoch + self._lr_epoch_offset
+        n_decays = effective_epoch // int(self.cfg.training.lr_decay_step)
         new_lr = max(1e-7,
                      float(self.cfg.training.lr)
                      - n_decays * float(self.cfg.training.lr_decay_amount))
@@ -85,6 +91,12 @@ class RadarTacoTrainer:
 
     # ----------------------------------------------------------- train --
     def train(self) -> None:
+        # MoE + stage 1 → also run an oracle (teacher-forced) val each epoch
+        # for monitoring the ceiling. Log-only; does not affect best.pt.
+        run_oracle_val = (
+            bool(getattr(self.cfg.model, "moe_at_l", None))
+            and int(getattr(self.cfg.model, "moe_stage", 2)) == 1
+        )
         for epoch in range(self.start_epoch, self.cfg.training.epochs):
             self._adjust_lr(epoch)
             self._train_one_epoch(epoch)
@@ -93,11 +105,23 @@ class RadarTacoTrainer:
             for name, loader in self.val_loaders_extra.items():
                 _, agg_extra = self._validate_on(loader, log_tag=f"VAL[{name}]")
                 extras[name] = agg_extra
+            agg_oracle = None
+            if run_oracle_val:
+                _, agg_oracle = self._validate_on(
+                    self.val_loader, log_tag="VAL[oracle]", oracle=True)
             viz = self._build_viz_panel() if (self.wandb is not None and self.viz_sampler) else None
             if self.wandb is not None:
-                self.wandb.log_validation(epoch, agg, images=viz)
+                # wandb val step continues across stages: `epoch` restarts at
+                # 0 in stage 2 (weights_only=True), but `_lr_epoch_offset` is
+                # the number of epochs already run in the prior stage, so
+                # `epoch + _lr_epoch_offset` is the true wandb x-value that
+                # lines up with stage-1's val curves.
+                wb_step = epoch + self._lr_epoch_offset
+                self.wandb.log_validation(wb_step, agg, images=viz)
                 for name, agg_extra in extras.items():
-                    self.wandb.log_validation(epoch, agg_extra, prefix=f"eval_{name}")
+                    self.wandb.log_validation(wb_step, agg_extra, prefix=f"eval_{name}")
+                if agg_oracle is not None:
+                    self.wandb.log_validation(wb_step, agg_oracle, prefix="eval_oracle")
             self._save_checkpoint(metrics, epoch, agg)
 
     def _train_one_epoch(self, epoch: int) -> None:
@@ -164,25 +188,37 @@ class RadarTacoTrainer:
 
     # ------------------------------------------------------- validation --
     @torch.no_grad()
-    def _validate_on(self, loader: DataLoader, log_tag: str = "VAL"):
+    def _validate_on(self, loader: DataLoader, log_tag: str = "VAL",
+                     oracle: bool = False):
         self.model.eval()
+        # Oracle mode: temporarily flip the MoE gate to use dense-GT (teacher
+        # forcing) inside .forward. Restored in `finally` so a crash mid-epoch
+        # can't leave the model stuck in oracle mode for downstream calls.
+        if oracle:
+            self.model._oracle_eval = True
         all_metrics = []
-        for batch in loader:
-            batch = self._to_device(batch)
-            with autocast(enabled=self.amp, dtype=self.amp_dtype):
-                pred = self.model(batch["rgb_norm"],
-                                  batch["radar_points"],
-                                  batch["radar_mask"],
-                                  batch.get("rel_depth"))
-            if isinstance(pred, dict):
-                pred = pred["depth"]
-            B = pred.shape[0]
-            for b in range(B):
-                pn = pred[b, 0].float().cpu().numpy()
-                gn = batch["depth_gt_lidar"][b, 0].cpu().numpy()
-                mn = batch["valid_mask_lidar"][b, 0].cpu().numpy().astype(bool)
-                is_n = bool(batch["is_night"][b].item()) if torch.is_tensor(batch["is_night"]) else False
-                all_metrics.append(self.evaluator.evaluate_sample(pn, gn, mn, is_night=is_n))
+        try:
+            for batch in loader:
+                batch = self._to_device(batch)
+                with autocast(enabled=self.amp, dtype=self.amp_dtype):
+                    pred = self.model(batch["rgb_norm"],
+                                      batch["radar_points"],
+                                      batch["radar_mask"],
+                                      batch.get("rel_depth"),
+                                      depth_gt_dense=(batch.get("depth_gt_dense")
+                                                      if oracle else None))
+                if isinstance(pred, dict):
+                    pred = pred["depth"]
+                B = pred.shape[0]
+                for b in range(B):
+                    pn = pred[b, 0].float().cpu().numpy()
+                    gn = batch["depth_gt_lidar"][b, 0].cpu().numpy()
+                    mn = batch["valid_mask_lidar"][b, 0].cpu().numpy().astype(bool)
+                    is_n = bool(batch["is_night"][b].item()) if torch.is_tensor(batch["is_night"]) else False
+                    all_metrics.append(self.evaluator.evaluate_sample(pn, gn, mn, is_night=is_n))
+        finally:
+            if oracle:
+                self.model._oracle_eval = False
         agg = self.evaluator.aggregate_metrics(all_metrics)
         head = agg.get("overall", {}).get("0-80m", {})
         head100 = agg.get("overall", {}).get("0-100m", {})
@@ -249,7 +285,12 @@ class RadarTacoTrainer:
         cur = metrics.get("mae", float("inf"))
         if cur < self.best_metric:
             self.best_metric = cur
-            torch.save({"model": self.model.state_dict(), "epoch": epoch},
+            # global_step in best.pt lets a following stage warm-start with
+            # `carry_schedule=True` (LR schedule + wandb step axis continue
+            # from stage 1). Older best.pt files without this key still work.
+            torch.save({"model": self.model.state_dict(),
+                        "epoch": epoch,
+                        "global_step": self.global_step},
                        os.path.join(out, "best.pt"))
             logger.info(f"saved best.pt at epoch {epoch} (MAE={cur:.1f})")
         snapshots = self.cfg.training.get("save_epoch_snapshots", None) or []
@@ -263,7 +304,25 @@ class RadarTacoTrainer:
                         "metrics": agg}, snap)
             logger.info(f"saved snapshot {snap}")
 
-    def load_checkpoint(self, path: str, weights_only: bool = False) -> None:
+    def load_checkpoint(self, path: str, weights_only: bool = False,
+                        carry_schedule: bool = False) -> None:
+        """Load a checkpoint.
+
+        Modes:
+          • weights_only=False   → full resume: model + optimizer + start_epoch
+                                    + global_step. Continues the SAME run.
+          • weights_only=True    → cross-run warm start: model only.
+                                    Training restarts at epoch 0, LR at
+                                    initial value, wandb step at 0.
+          • weights_only=True + carry_schedule=True  → same as weights_only
+                                    but also carries `global_step` (wandb
+                                    x-axis) and `_lr_epoch_offset` (so the
+                                    LR schedule continues where the loaded
+                                    checkpoint ended). `start_epoch` still
+                                    resets to 0 so the caller trains a
+                                    fresh `cfg.training.epochs` epochs.
+                                    Use for stage 1 → stage 2 chains.
+        """
         ckpt = torch.load(path, map_location=self.device)
         self.model.load_state_dict(ckpt["model"], strict=not weights_only)
         if not weights_only and "optimizer" in ckpt:
@@ -273,5 +332,20 @@ class RadarTacoTrainer:
             # Resume from the *next* epoch — `epoch` in the ckpt is the
             # last completed one (saved after _train_one_epoch + validate).
             self.start_epoch = int(ckpt.get("epoch", -1)) + 1
+        elif carry_schedule:
+            # Cross-run warm start that keeps the schedule + step axis intact.
+            # Missing keys (older checkpoints) fall back to 0 with a warning.
+            gs = ckpt.get("global_step")
+            ep = ckpt.get("epoch")
+            if gs is None or ep is None:
+                logger.warning(
+                    f"carry_schedule=True but checkpoint lacks "
+                    f"{'global_step ' if gs is None else ''}"
+                    f"{'epoch' if ep is None else ''} — treating missing as 0"
+                )
+            self.global_step = int(gs if gs is not None else 0)
+            self._lr_epoch_offset = int(ep) + 1 if ep is not None else 0
         logger.info(f"loaded checkpoint from {path} "
-                    f"(weights_only={weights_only}, start_epoch={self.start_epoch})")
+                    f"(weights_only={weights_only}, carry_schedule={carry_schedule}, "
+                    f"start_epoch={self.start_epoch}, lr_epoch_offset={self._lr_epoch_offset}, "
+                    f"global_step={self.global_step})")

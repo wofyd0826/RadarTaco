@@ -1,0 +1,47 @@
+# RadarTaco MoE v4c — Options A + C: top_k=2, halved experts, SOFT router CE.
+#
+# Same as radartaco_moe_v4a EXCEPT router GT format:
+#   moe_router_gt_type: hard → soft
+#
+# What "soft" means:
+#   Instead of the majority-vote bin (a hard int label per token), the
+#   router is trained against the token's per-bin pixel FRACTION
+#   ([near_frac, mid_frac, far_frac], sums to 1). F.cross_entropy accepts
+#   probability targets natively, so no loss-function change is required.
+#
+# Motivation:
+#   • Hard CE has an intrinsic ceiling near 90% because ~15% of tokens are
+#     truly mixed at bin boundaries — their majority-vote label is
+#     unstable and provides contradictory supervision.
+#   • Soft CE makes the target the actual pixel ratio, so a 60/40 near/mid
+#     token has target [0.6, 0.4, 0] which is deterministic and reachable.
+#     Boundary tokens contribute a well-defined signal instead of noise.
+#   • Stage-1 teacher-forcing gate also becomes SOFT under this setting
+#     (gate = frac directly). Matches the `soft` mode of the
+#     perfect_soft ceiling analysis, which produced ≈ oracle depth.
+#
+# All other axes (top_k=2, halved experts, mlp3x3 router) match v4a so the
+# hard-vs-soft comparison is isolated.
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 8
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+
+# ── MoE options ──
+moe_at_l: [2]
+moe_n_experts: 3
+moe_use_shared: false
+moe_top_k: 2
+moe_stage: 2
+moe_bins: [0.0, 20.0, 50.0, 100.0]
+moe_router_arch: mlp3x3
+moe_expert_ch_ratio: 0.5
+moe_router_gt_type: soft      # ← v4c: pixel-fraction target for router CE

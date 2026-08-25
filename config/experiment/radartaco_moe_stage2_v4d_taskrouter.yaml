@@ -1,0 +1,78 @@
+# @package _global_
+# MoE v4d_taskrouter stage-2 — v4c stage 2 (self-routing) with task-aware
+# router loss added. Router is supervised by BOTH:
+#   - pixel-bin soft CE (w_router = 5.0)    : "which bin does this token belong to?"
+#   - task-aware router loss (w_task_router): "which specialist predicts best?"
+#
+# Warm-start from v4c STAGE 1 last.pt — same as v4c stage 2 does. Task-aware
+# router loss is active from the start of self-routing training so the
+# router learns the joint objective end-to-end instead of being retrofitted
+# onto a CE-only-trained router.
+defaults:
+  - override /model: radartaco_moe_v4d_taskrouter
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 2
+  moe_use_shared: false
+  moe_top_k: 2
+  moe_expert_ch_ratio: 0.5
+  moe_router_gt_type: soft
+  moe_per_spec_aux: true
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  # Keep pixel-bin CE as an anchor (helps stabilize router at start).
+  w_router: 5.0
+  # NEW: task-aware router loss.
+  #   Target = softmax(-per_spec_pool_err_m / T)  over specialists.
+  #   Small T → sharp target (near-one-hot on best spec).
+  #   Large T → soft target (many specialists get some prob).
+  #   T = 1.0 means "one meter of error difference is a 1-unit softmax gap"
+  #   — reasonable given per-spec errors range from 0.7 to ~22 m.
+  w_task_router: 2.0
+  task_router_temperature: 1.0
+
+training:
+  # Full stage-2 training from v4c STAGE 1 last (not stage 2 last). Router
+  # sees the task-aware signal from the beginning of self-routing training,
+  # instead of being fine-tuned from an already-CE-only-trained router.
+  # Matches v4c stage 2 length so schedules align (v4c stage 2 also
+  # warm-starts from v4c stage 1 last with same 20-epoch length).
+  epochs: 20
+  # Batch size reduced from default 12 → 8 to fit K=3 extra per-spec
+  # decoder forwards (~4 total decoder passes per training step) in
+  # memory.
+  batch_size: 12
+  load_weights_from: output/radartaco_moe_stage1_v4c/last.pt
+  load_weights_carry_schedule: true
+
+wandb:
+  name: radartaco_moe_stage2_v4d_taskrouter
+  tags: [moe, stage2, taskrouter, no-shared, router-mlp3x3, top_k2,
+         expert-ratio-half, soft-ce, v4d_taskrouter]
+  notes: >
+    Stage-2 MoE v4d_taskrouter — fine-tune v4c stage 2 with task-aware
+    router loss. Router learns to route based on which specialist actually
+    predicts best per token (softmax(-per_spec_pooled_L1/T) as target), in
+    addition to the existing pixel-bin CE anchor. K=3 extra decoder passes
+    per training step (no shared aux, no shared expert). 20 epoch from
+    v4c STAGE 1 last (same warm-start as v4c stage 2 — direct comparison).

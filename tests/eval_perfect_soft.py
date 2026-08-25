@@ -49,7 +49,8 @@ from scripts.train import _build_model
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 BINS = [0.0, 20.0, 50.0, 100.0]
-MODES = ["normal", "oracle", "soft", "soft_mixed_oracle", "soft_mixed_normal"]
+MODES = ["normal", "oracle", "soft", "soft_mixed_oracle", "soft_mixed_normal",
+         "top2", "top3"]
 
 
 def load_model(run_dir, ckpt="best.pt"):
@@ -155,6 +156,15 @@ class SoftRoutingHook:
                 gate = is_mixed * frac + (1.0 - is_mixed) * hard_gt_gate
             elif mode == "soft_mixed_normal":
                 gate = is_mixed * frac + (1.0 - is_mixed) * self_gate
+            elif mode == "top2":
+                # Router's own probs, top-2 with sum-renorm.
+                # Overrides self_blk.top_k (which is 1 for RadarTaco).
+                top_vals, idx = probs.topk(2, dim=1)
+                top_vals = top_vals / top_vals.sum(dim=1, keepdim=True).clamp_min(1e-8)
+                gate = torch.zeros_like(probs).scatter_(1, idx, top_vals)
+            elif mode == "top3":
+                # Full softmax mixture — all 3 experts active per token.
+                gate = probs
             else:
                 raise ValueError(mode)
 

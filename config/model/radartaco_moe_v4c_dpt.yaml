@@ -1,0 +1,45 @@
+# RadarTaco MoE v4c + DPT-style multi-scale router.
+#
+# Same v4c architecture (top_k=2, halved experts, soft router GT) but the
+# router's single-scale mlp3x3 head is REPLACED with a DPT-style multi-
+# scale router.
+#
+# What changes:
+#   • Router input: image_encoder features F3..F6 (1/8, 1/16, 1/32, 1/64
+#     natural resolutions), not just the fusion block's `feat`.
+#   • Router head: RefineNet-style bottom-up fusion (deepest → shallowest)
+#     with residual conv units at fusion_ch=128, then 3x3 + 1x1 conv to K
+#     logits. Analogous to DepthBin's DPTHead but the reassembly target is
+#     the MoE block's token grid (not 4x it).
+#
+# Motivation (from v4c misroute analysis + CB result):
+#   • Router 90% ceiling with single-scale features → multi-scale should
+#     help boundary tokens (need both fine texture and scene-level context
+#     to decide near vs mid at ~20m).
+#   • Router at edge_block (1/64 grid) has very coarse features — adding
+#     shallower layers should give it access to finer cues.
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 8
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+
+# ── MoE options ──
+moe_at_l: [2]
+moe_n_experts: 3
+moe_use_shared: false
+moe_top_k: 2
+moe_stage: 2
+moe_bins: [0.0, 20.0, 50.0, 100.0]
+moe_router_arch: dpt                        # ← DPT-style multi-scale router
+moe_router_dpt_source_layers: [2, 3, 4, 5]  # F3..F6 (indices into feats)
+moe_router_dpt_fusion_ch: 128
+moe_expert_ch_ratio: 0.5
+moe_router_gt_type: soft

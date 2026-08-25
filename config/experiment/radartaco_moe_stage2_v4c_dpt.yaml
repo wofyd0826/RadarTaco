@@ -1,0 +1,47 @@
+# @package _global_
+# MoE v4c stage-2 (self-routing) — DPT-style multi-scale router.
+# Warm-start MUST come from radartaco_moe_stage1_v4c_dpt (matching arch).
+defaults:
+  - override /model: radartaco_moe_v4c_dpt
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 2
+  moe_use_shared: false
+  moe_top_k: 2
+  moe_expert_ch_ratio: 0.5
+  moe_router_gt_type: soft
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 5.0
+
+training:
+  epochs: 20
+  load_weights_from: output/radartaco_moe_stage1_v4c_dpt/last.pt
+  load_weights_carry_schedule: true
+
+wandb:
+  name: radartaco_moe_stage2_v4c_dpt
+  tags: [moe, stage2, self-routing, no-shared, router-dpt, top_k2, expert-ratio-half, soft-ce, v4c_dpt]
+  notes: >
+    Stage-2 v4c_dpt — self-routing at top_k=2 with DPT-style multi-scale
+    router. Warm-start from stage1_v4c_dpt last.pt.

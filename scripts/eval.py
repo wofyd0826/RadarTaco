@@ -20,6 +20,13 @@ import logging
 import os
 import sys
 
+# Cap BLAS/OpenMP threadpools BEFORE importing torch — see scripts/train.py
+# for the rationale (container cpu.max << host nproc).
+_DEFAULT_INTRA_THREADS = "4"
+for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+             "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_var, _DEFAULT_INTRA_THREADS)
+
 import hydra
 import numpy as np
 import torch
@@ -27,6 +34,9 @@ from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+torch.set_num_threads(int(os.environ["OMP_NUM_THREADS"]))
+torch.set_num_interop_threads(2)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -109,6 +119,20 @@ def _build_eval_model(cfg, device):
             moe_stage=int(cfg.model.get("moe_stage", 2)),
             moe_bins=tuple(cfg.model.get("moe_bins", (0.0, 20.0, 50.0, 100.0))),
             moe_router_arch=str(cfg.model.get("moe_router_arch", "conv1x1")),
+            moe_expert_ch_ratio=float(cfg.model.get("moe_expert_ch_ratio", 1.0)),
+            moe_router_gt_type=str(cfg.model.get("moe_router_gt_type", "hard")),
+            moe_overlap_bins=cfg.model.get("moe_overlap_bins", None),
+            moe_shared_gate_mode=str(cfg.model.get("moe_shared_gate_mode", "always_on")),
+            moe_shared_aux=bool(cfg.model.get("moe_shared_aux", False)),
+            moe_per_spec_aux=bool(cfg.model.get("moe_per_spec_aux", False)),
+            moe_router_dpt_source_layers=(
+                tuple(cfg.model.get("moe_router_dpt_source_layers"))
+                if cfg.model.get("moe_router_dpt_source_layers") is not None else None),
+            moe_router_dpt_fusion_ch=int(cfg.model.get("moe_router_dpt_fusion_ch", 128)),
+            moe_pre_fusion_enabled=bool(cfg.model.get("moe_pre_fusion_enabled", False)),
+            moe_pre_fusion_feed_experts=bool(cfg.model.get("moe_pre_fusion_feed_experts", False)),
+            moe_pre_fusion_ch_ratio=float(cfg.model.get("moe_pre_fusion_ch_ratio", 1.0)),
+            moe_pre_fusion_router_detach=bool(cfg.model.get("moe_pre_fusion_router_detach", False)),
         )
     return m.to(device).eval()
 

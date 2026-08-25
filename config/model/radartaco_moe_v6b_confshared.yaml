@@ -1,0 +1,57 @@
+# RadarTaco MoE v6b_confshared — v5_shared + confidence gating at INFERENCE ONLY.
+#
+# Sole difference from v6a: moe_shared_gate_mode: confidence → confidence_infer.
+#
+# What "confidence_infer" mode does (see MoEFusionBlock.forward):
+#   Training:  spec_gate ← spec_gate,  shared_weight ← 1  (v5 always-on)
+#   Inference: spec_gate ← spec_gate · α, shared_weight ← 1 − α
+#     α = (K · max(gate) − 1) / (K − 1) ∈ [0, 1]
+#
+#   Intent:
+#     • Training uses v5 always-on so shared receives FULL gradient on
+#       every token → learns a generalist depth-fusion path.
+#     • Inference uses conservation so shared acts as a fallback for
+#       uncertain tokens without diluting the specialist mixture on
+#       confident ones.
+#
+#   Trade-off: training and inference forward paths differ (controlled
+#   train-test mismatch). Expected benefit: shared is a strong standalone
+#   predictor, so when α → 0 at inference it can carry the token alone.
+#
+# Contrast with v6a (confidence): v6a trains shared only on uncertain
+# tokens (α<1). v6b trains shared on ALL tokens. Which is the better
+# fallback is an open empirical question these two configs answer.
+#
+# All other MoE axes match v5_shared / v6a.
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 8
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+
+# ── MoE options ──
+moe_at_l: [2]
+moe_n_experts: 3
+moe_use_shared: true
+moe_top_k: 2
+moe_stage: 2
+moe_bins: [0.0, 20.0, 50.0, 100.0]
+moe_router_arch: mlp3x3
+moe_expert_ch_ratio: 0.5
+moe_router_gt_type: soft
+moe_shared_gate_mode: confidence_infer   # ← v6b: v5 during train / confidence at infer
+
+# Auxiliary shared-only depth head — trains shared as standalone generalist.
+# When true, forward (training only) additionally decodes `feat + shared_delta`
+# (no specialists) into `depth_shared`, which ComposedLoss supervises via
+# `w_shared_aux` on top of the main task loss. Doubles decoder forward but
+# ensures shared learns a strong solo prediction — needed because at inference
+# α → 0 tokens are handed to shared alone.
+moe_shared_aux: true

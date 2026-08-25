@@ -41,7 +41,7 @@ loss:
 
 training:
   epochs: 10
-  load_weights_from: output/radartaco_moe_stage1_warm25_pixmask_v2/best.pt
+  load_weights_from: output/radartaco_moe_stage1_warm25_pixmask_v2/last.pt
 
 wandb:
   name: radartaco_moe_stage2_warm25_pixmask_v2

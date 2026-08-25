@@ -1,0 +1,62 @@
+# @package _global_
+# MoE v4c-based, ROUTER REMOVED — deterministic rel_depth routing.
+#
+# See config/model/radartaco_moe_v4c_rel_deterministic.yaml for design detail.
+#
+# SINGLE-STAGE training (no stage 1 vs stage 2). Because routing is 100%
+# deterministic (no learned router), there is no teacher-forcing to
+# distinguish training regimes. Specialists are trained from scratch with
+# the deterministic gate throughout.
+#
+# Run:
+#   python scripts/train.py +experiment=radartaco_moe_v4c_rel_deterministic
+defaults:
+  - override /model: radartaco_moe_v4c_rel_deterministic
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+  rel_depth_dir: relative_depth       # required — deterministic router reads this
+  rel_depth_dropout_prob: 0.0         # MUST be 0 — dropout would zero-out rel_depth
+                                       # and route every token to bin 0.
+
+model:
+  moe_stage: 2                        # nominal (no teacher-forcing anyway)
+  moe_use_shared: false
+  moe_top_k: 2
+  moe_expert_ch_ratio: 0.5
+  moe_router_arch: deterministic_rel_depth
+  moe_bins: [0.0, 0.174, 0.382, 1.001]
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 0.0                       # no router to train
+
+training:
+  # v4c does stage1 (30) + stage2 (20) = 50 epochs. Here single-stage,
+  # match total budget: 50 epochs.
+  epochs: 50
+
+wandb:
+  name: radartaco_moe_v4c_rel_deterministic
+  tags: [moe, deterministic-router, rel-depth-routing, no-shared, top_k2, expert-ratio-half, single-stage, v4c-based]
+  notes: >
+    v4c-based MoE with router REMOVED. Routing is 100% deterministic
+    from rel_depth (Marigold) using quantile bins [0, 0.174, 0.382, 1].
+    Specialists trained on rel_depth-derived pixel_fraction gate;
+    task loss still on GT depth. Single-stage, 50 epochs total.

@@ -6,7 +6,7 @@
 # λ0=λ2=5) so the flow is dominated by trajectory (depth) accuracy.
 #
 # Warm-start: load stage-1 best checkpoint via
-# `training.load_weights_from=output/radartaco_moe_stage1/best.pt`.
+# `training.load_weights_from=output/radartaco_moe_stage1/last.pt`.
 defaults:
   - override /model: radartaco_moe
   - override /dataset: nuscenes
@@ -45,7 +45,7 @@ loss:
 training:
   epochs: 20                # fair comparison: total 30+20=50 = baseline
   # Fill in after stage 1 finishes:
-  # load_weights_from: /path/to/output/radartaco_moe_stage1/best.pt
+  # load_weights_from: /path/to/output/radartaco_moe_stage1/last.pt
 
 wandb:
   name: radartaco_moe_stage2

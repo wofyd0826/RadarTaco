@@ -1,0 +1,48 @@
+# @package _global_
+# MoE v4c stage-1 (teacher forcing) — balanced bins [0, 10, 25, 100].
+# Same as stage1_v4c EXCEPT `moe_bins` retuned for ~equal pixel share.
+defaults:
+  - override /model: radartaco_moe_v4c_bins10_25
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 1
+  moe_use_shared: false
+  moe_top_k: 2
+  moe_expert_ch_ratio: 0.5
+  moe_router_gt_type: soft
+  moe_bins: [0.0, 10.0, 25.0, 100.0]
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 10.0
+
+training:
+  epochs: 30
+
+wandb:
+  name: radartaco_moe_stage1_v4c_bins10_25
+  tags: [moe, stage1, teacher-forcing, no-shared, router-mlp3x3, top_k2, expert-ratio-half, soft-ce, balanced-bins, v4c_bins10_25]
+  notes: >
+    Stage-1 v4c with balanced bin edges [0, 10, 25, 100] — each expert
+    sees ~33% of pixels during teacher forcing. Tests whether equal
+    training signal per expert closes the routing-imbalance gap that
+    prompted CB weight in the first place.

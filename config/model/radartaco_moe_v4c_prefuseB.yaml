@@ -1,0 +1,47 @@
+# RadarTaco MoE v4c + two-stage pre-fusion, Option B.
+#
+# One extra `_FusionBlock` (full-cap) runs BEFORE the router. ONLY the
+# router uses the pre-fused feature; the halved experts still receive the
+# raw image feat. Output is:
+#     feat + Σ_k gate[k] · (expert_k(feat) - feat)
+# where gate was decided using the radar-informed feature.
+#
+# Rationale:
+#   • Isolates the "router-only" benefit of pre-fusion (does giving router
+#     access to radar info improve routing accuracy?) — expert behavior
+#     unchanged from plain v4c.
+#   • Pre-fusion learns ONLY via router CE gradient (unless
+#     `moe_pre_fusion_router_detach=true` disables even that — do NOT set
+#     detach with Option B or pre-fusion is untrained).
+#
+# Cost vs plain v4c: one extra full-cap fusion pass per node/edge block
+# (~+30-40% forward time), +~4M params.
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 8
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+
+# ── MoE options ──
+moe_at_l: [2]
+moe_n_experts: 3
+moe_use_shared: false
+moe_top_k: 2
+moe_stage: 2
+moe_bins: [0.0, 20.0, 50.0, 100.0]
+moe_router_arch: mlp3x3
+moe_expert_ch_ratio: 0.5
+moe_router_gt_type: soft
+
+# ── Pre-fusion (Option B) ──
+moe_pre_fusion_enabled: true
+moe_pre_fusion_feed_experts: false      # B: experts see raw feat
+moe_pre_fusion_ch_ratio: 1.0
+moe_pre_fusion_router_detach: false     # must be false in Option B (only signal source)

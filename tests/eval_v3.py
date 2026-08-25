@@ -40,7 +40,17 @@ def load_model(run_dir, ckpt="best.pt"):
     return m.eval().to(device)
 
 
-def compute_token_gt(depth_gt_dense, tok_hw, bins):
+def compute_token_gt(depth_gt_dense, tok_hw, bins, return_type: str = "hard"):
+    """Per-token routing GT derived from `depth_gt_dense`.
+
+    Args:
+        return_type: "hard" → (B, H, W) int64 majority-vote bin index.
+                     "soft" → (B, K, H, W) float pixel-bin FRACTION (sums to 1
+                                 along K); matches MoEFusionBlock's soft
+                                 `router_gt_type` regime.
+                     "both" → (frac_soft, argmax_hard) tuple — useful when
+                              the caller needs both formats without recompute.
+    """
     K = len(bins) - 1
     edges = torch.tensor(bins, device=depth_gt_dense.device, dtype=torch.float32)
     ds = depth_gt_dense.squeeze(1)
@@ -51,98 +61,258 @@ def compute_token_gt(depth_gt_dense, tok_hw, bins):
     pix_bin = torch.where(ds >= float(edges[-1]),
                           pix_bin.new_tensor(K-1), pix_bin)
     onehot = F.one_hot(pix_bin, num_classes=K).permute(0, 3, 1, 2).float()
-    frac = F.adaptive_avg_pool2d(onehot, tok_hw)
-    return frac.argmax(dim=1)
+    frac = F.adaptive_avg_pool2d(onehot, tok_hw)                # (B, K, H, W)
+    if return_type == "soft":
+        return frac
+    if return_type == "both":
+        return frac, frac.argmax(dim=1)
+    return frac.argmax(dim=1)                                   # hard (default)
 
 
 def per_range(pred, gt, mask, ranges):
+    """Return {range_name: (sum_l1, sum_sq, count)} for MAE + RMSE aggregation."""
     out = {}
     for (lo, hi) in ranges:
         m = mask & (gt >= lo) & (gt < hi) & (gt > 0)
         if m.any():
-            err = np.abs(pred[m] - gt[m])
-            out[f"[{lo},{hi})m"] = (float(err.sum()), int(m.sum()))
+            diff = pred[m] - gt[m]
+            out[f"[{lo},{hi})m"] = (float(np.abs(diff).sum()),
+                                    float((diff * diff).sum()),
+                                    int(m.sum()))
         else:
-            out[f"[{lo},{hi})m"] = (0.0, 0)
+            out[f"[{lo},{hi})m"] = (0.0, 0.0, 0)
     for cap in (80.0, 100.0):
         m = mask & (gt > 0) & (gt < cap)
         if m.any():
-            err = np.abs(pred[m] - gt[m])
-            out[f"0-{cap:g}m"] = (float(err.sum()), int(m.sum()))
+            diff = pred[m] - gt[m]
+            out[f"0-{cap:g}m"] = (float(np.abs(diff).sum()),
+                                  float((diff * diff).sum()),
+                                  int(m.sum()))
         else:
-            out[f"0-{cap:g}m"] = (0.0, 0)
+            out[f"0-{cap:g}m"] = (0.0, 0.0, 0)
     return out
 
 
-def evaluate(model, ds, indices, ranges, mode, bins=None):
-    """mode: 'normal' | 'oracle'.
+def _collect_moe_blocks(model):
+    """Enumerate MoE blocks in `router_logits` order (node then edge per level)."""
+    out = []
+    for l in range(len(model.radar_fusion.node_blocks)):
+        nb = model.radar_fusion.node_blocks[l]
+        eb = model.radar_fusion.edge_blocks[l]
+        if isinstance(nb, MoEFusionBlock): out.append((f"L{l}_node", nb))
+        if isinstance(eb, MoEFusionBlock): out.append((f"L{l}_edge", eb))
+    return out
 
-    'normal': also computes router accuracy (from same forward — router
-    logits emitted alongside depth pred).
-    'oracle': overrides router via forward hook.
-    Returns: (mae_dict, router_acc_or_None, confusion_or_None)
+
+def evaluate_all_modes(model, ds, indices, ranges, bins=None, spec_only=False):
+    """Unified per-sample evaluation of Normal + OracleHard + OracleSoft.
+
+    Speedups over calling `evaluate()` three times:
+      • Dataset loaded ONCE per sample (was 3×).
+      • MoE block enumeration + hook creation done ONCE (was 3×).
+      • OracleSoft is SKIPPED entirely for models whose MoE blocks all have
+        `top_k == 1`, because the soft-frac gate collapses to hard via the
+        top-1 gate mechanism (result is identical to OracleHard, verified
+        empirically on v3_fix). OracleSoft is then filled in by copying
+        OracleHard so downstream code stays uniform.
+      • Router stats (hard acc + soft_l1 per MoE block) computed as a
+        side-effect of the Normal pass — no extra forward.
+
+    Encoder / radar / L0-L1 fusion still re-run for each oracle pass — a
+    deeper cache would need model-forward surgery.
+
+    Returns: (
+        results: {"Normal": {"mae": range_dict, "rmse": range_dict},
+                  "OracleHard": {...}, "OracleSoft": {...}},
+        router_stats: dict from Normal pass (see below),
+        skipped_soft: bool — True if OracleSoft was copied from OracleHard,
+        timing: {mode: {"total_s": float, "per_sample_s": float,
+                        "n_forwards": int}}  — GPU-synchronized per-mode
+                                               forward-only wall time.
+    )
+
+    router_stats layout:
+      {'blocks': {block_name: {'confusion': KxK, 'accuracy', 'recall',
+                                'soft_l1', 'tokens'}},
+       'overall': {'accuracy', 'tokens', 'soft_l1'}}
     """
-    moe_blocks = [blk for blk in
-                  (model.radar_fusion.node_blocks[2], model.radar_fusion.edge_blocks[2])
-                  if isinstance(blk, MoEFusionBlock)]
-    current_gt = {}
+    moe_blocks = _collect_moe_blocks(model)
+
+    # Optionally strip shared expert and disable confidence gating so the
+    # forward is "pure specialist mix" — same as v4c's inference regime.
+    # Useful for isolating specialist quality in models trained with a
+    # shared expert (v5_shared, v6a, v6b, v6c). Restored in `finally`.
+    saved_shared = {}
+    saved_gate_mode = {}
+    if spec_only:
+        for name, blk in moe_blocks:
+            saved_shared[name] = blk.shared
+            saved_gate_mode[name] = blk.shared_gate_mode
+            blk.shared = None                  # skip shared code path entirely
+            blk.shared_gate_mode = "always_on" # disable α scaling of gate
+
+    # Detect if OracleSoft can be safely skipped (top_k == 1 for all MoE blocks).
+    skip_soft = bool(moe_blocks) and all(
+        (blk.top_k is not None and blk.top_k == 1) for _, blk in moe_blocks
+    )
+    modes_to_run = ["Normal", "OracleHard"] + ([] if skip_soft else ["OracleSoft"])
+
+    # Single hook per router; mode flag decides behaviour on each forward.
+    dgd_holder = {"dgd": None, "mode": None}  # mode ∈ {None, 'hard', 'soft'}
     hooks = []
-    if mode == "oracle" and moe_blocks:
-        def make_hook(blk):
-            def _h(_m, _i, out):
-                gt = current_gt.get(id(blk))
-                if gt is None: return out
-                forced = torch.full_like(out, -1e4)
-                forced.scatter_(1, gt.unsqueeze(1), 1e4)
-                return forced
-            return _h
-        for blk in moe_blocks:
-            hooks.append(blk.router.register_forward_hook(make_hook(blk)))
+    if moe_blocks:
+        def _hook(_m, _i, out):
+            mode = dgd_holder["mode"]
+            dgd = dgd_holder["dgd"]
+            if mode is None or dgd is None:
+                return out                                   # Normal pass — passthrough
+            if mode == "soft":
+                frac = compute_token_gt(dgd, out.shape[-2:], bins,
+                                        return_type="soft")  # (B, K, H, W)
+                return torch.log(frac.clamp_min(1e-8))
+            tok_gt = compute_token_gt(dgd, out.shape[-2:], bins,
+                                      return_type="hard")    # (B, H, W)
+            forced = torch.full_like(out, -1e4)
+            forced.scatter_(1, tok_gt.unsqueeze(1), 1e4)
+            return forced
+        for _, blk in moe_blocks:
+            hooks.append(blk.router.register_forward_hook(_hook))
 
     K = len(bins) - 1 if bins else 3
-    acc = defaultdict(lambda: [0.0, 0])
-    confusion = torch.zeros(K, K, dtype=torch.long) if mode == "normal" else None
+    # (sum_l1, sum_sq, count) accumulators per mode → MAE + RMSE.
+    accs = {m: defaultdict(lambda: [0.0, 0.0, 0]) for m in modes_to_run}
+    # Per-mode GPU-synchronized forward wall time.
+    timing = {m: {"total_s": 0.0, "n_forwards": 0} for m in modes_to_run}
+    # Router stats (only for Normal pass).
+    confusion = {name: torch.zeros(K, K, dtype=torch.long) for name, _ in moe_blocks}
+    soft_l1 = {name: [0.0, 0] for name, _ in moe_blocks}
 
-    with torch.no_grad():
-        for i in tqdm(indices, desc=mode, leave=False):
-            s = ds[int(i)]
-            rgb = s["rgb_norm"].unsqueeze(0).to(device)
-            rp = s["radar_points"].unsqueeze(0).to(device)
-            rm = s["radar_mask"].unsqueeze(0).to(device)
-            dgd = s["depth_gt_dense"].unsqueeze(0).to(device)
-            if mode == "oracle" and moe_blocks:
-                current_gt[id(moe_blocks[0])] = compute_token_gt(dgd, (29, 50), bins)
-                current_gt[id(moe_blocks[1])] = compute_token_gt(dgd, (15, 25), bins)
+    def _timed_forward(mode_name):
+        """Run one model forward, GPU-synchronized on both sides for accurate
+        wall-time. Returns the model output."""
+        if device == "cuda":
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        out = model(rgb, rp, rm)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        timing[mode_name]["total_s"] += (time.perf_counter() - t0)
+        timing[mode_name]["n_forwards"] += 1
+        return out
 
-            out = model(rgb, rp, rm)
-            pred = out["depth"] if isinstance(out, dict) else out
-            pred_np = pred[0, 0].cpu().numpy()
-            gt_np = s["depth_gt_lidar"][0].cpu().numpy()
-            mask_np = s["valid_mask_lidar"][0].cpu().numpy().astype(bool)
+    try:
+        with torch.no_grad():
+            for i in tqdm(indices, desc="all modes", leave=False):
+                s = ds[int(i)]
+                rgb = s["rgb_norm"].unsqueeze(0).to(device)
+                rp  = s["radar_points"].unsqueeze(0).to(device)
+                rm  = s["radar_mask"].unsqueeze(0).to(device)
+                dgd = s["depth_gt_dense"].unsqueeze(0).to(device)
+                gt_np = s["depth_gt_lidar"][0].cpu().numpy()
+                mask_np = s["valid_mask_lidar"][0].cpu().numpy().astype(bool)
+                dgd_holder["dgd"] = dgd
 
-            r = per_range(pred_np, gt_np, mask_np, ranges)
-            for k, (se, n) in r.items():
-                acc[k][0] += se; acc[k][1] += n
+                # ---- Pass 1: Normal (no gate override) ----
+                dgd_holder["mode"] = None
+                out = _timed_forward("Normal")
+                pred = (out["depth"] if isinstance(out, dict) else out)[0, 0].cpu().numpy()
+                for k, (sl1, ssq, n) in per_range(pred, gt_np, mask_np, ranges).items():
+                    a = accs["Normal"][k]
+                    a[0] += sl1; a[1] += ssq; a[2] += n
 
-            # Router accuracy (only meaningful in normal mode — oracle hook
-            # replaces router logits, so router prediction is not the model's
-            # native prediction).
-            if mode == "normal" and isinstance(out, dict) and out.get("router_logits"):
-                rl = out["router_logits"][0]  # finest grid (L2 node)
-                token_pred = rl.softmax(dim=1).argmax(dim=1).squeeze(0)
-                token_gt = compute_token_gt(dgd, token_pred.shape, bins).squeeze(0)
-                for gt_b in range(K):
-                    for pr in range(K):
-                        confusion[gt_b, pr] += ((token_gt == gt_b) & (token_pred == pr)).sum().item()
+                # Router stats side-effect of Normal pass (real router logits).
+                if isinstance(out, dict) and out.get("router_logits"):
+                    for (name, _blk), rl in zip(moe_blocks, out["router_logits"]):
+                        probs = rl.softmax(dim=1)
+                        token_pred = probs.argmax(dim=1).squeeze(0)
+                        frac, token_gt_hard = compute_token_gt(
+                            dgd, token_pred.shape, bins, return_type="both")
+                        token_gt = token_gt_hard.squeeze(0)
+                        for gt_b in range(K):
+                            for pr in range(K):
+                                confusion[name][gt_b, pr] += (
+                                    (token_gt == gt_b) & (token_pred == pr)).sum().item()
+                        l1_per_token = (probs - frac).abs().sum(dim=1)
+                        soft_l1[name][0] += float(l1_per_token.sum().item())
+                        soft_l1[name][1] += int(l1_per_token.numel())
 
-    for h in hooks: h.remove()
-    current_gt.clear()
-    mae = {k: (v[0]/v[1] if v[1]>0 else float("nan")) for k, v in acc.items()}
-    if confusion is not None:
-        tot = confusion.sum().item()
-        router_acc = 100.0 * confusion.diagonal().sum().item() / max(tot, 1)
-        return mae, router_acc, confusion
-    return mae, None, None
+                # ---- Pass 2: OracleHard ----
+                dgd_holder["mode"] = "hard"
+                out = _timed_forward("OracleHard")
+                pred = (out["depth"] if isinstance(out, dict) else out)[0, 0].cpu().numpy()
+                for k, (sl1, ssq, n) in per_range(pred, gt_np, mask_np, ranges).items():
+                    a = accs["OracleHard"][k]
+                    a[0] += sl1; a[1] += ssq; a[2] += n
+
+                # ---- Pass 3: OracleSoft (skipped when top_k == 1 everywhere) ----
+                if not skip_soft:
+                    dgd_holder["mode"] = "soft"
+                    out = _timed_forward("OracleSoft")
+                    pred = (out["depth"] if isinstance(out, dict) else out)[0, 0].cpu().numpy()
+                    for k, (sl1, ssq, n) in per_range(pred, gt_np, mask_np, ranges).items():
+                        a = accs["OracleSoft"][k]
+                        a[0] += sl1; a[1] += ssq; a[2] += n
+    finally:
+        for h in hooks: h.remove()
+        dgd_holder.clear()
+        # Restore any temporarily-disabled shared experts / gating modes.
+        if spec_only:
+            for name, blk in moe_blocks:
+                blk.shared = saved_shared[name]
+                blk.shared_gate_mode = saved_gate_mode[name]
+
+    # Per-mode MAE + RMSE.
+    results = {}
+    for m in modes_to_run:
+        mae_d, rmse_d = {}, {}
+        for k, (sl1, ssq, n) in accs[m].items():
+            mae_d[k]  = (sl1 / n)              if n > 0 else float("nan")
+            rmse_d[k] = float(np.sqrt(ssq / n)) if n > 0 else float("nan")
+        results[m] = {"mae": mae_d, "rmse": rmse_d}
+    # Copy OracleSoft ≡ OracleHard when skipped so downstream code is uniform.
+    if skip_soft:
+        results["OracleSoft"] = {"mae":  dict(results["OracleHard"]["mae"]),
+                                 "rmse": dict(results["OracleHard"]["rmse"])}
+        timing["OracleSoft"] = dict(timing["OracleHard"])
+
+    # Finalize timing (per-sample = total / n_forwards).
+    for m, t in timing.items():
+        t["per_sample_s"] = (t["total_s"] / t["n_forwards"]) if t["n_forwards"] else float("nan")
+
+    # Router stats aggregation (same as before).
+    router_stats = None
+    if moe_blocks:
+        blocks = {}
+        total_correct = total_tokens = 0
+        total_soft_l1_sum = 0.0
+        total_soft_l1_n = 0
+        for name, C in confusion.items():
+            tot = int(C.sum().item())
+            corr = int(C.diagonal().sum().item())
+            recall = []
+            for b in range(K):
+                nb = int(C[b, :].sum().item())
+                recall.append(100.0 * int(C[b, b].item()) / nb if nb > 0 else float("nan"))
+            s_sum, s_n = soft_l1[name]
+            blocks[name] = {
+                "confusion": C.tolist(),
+                "accuracy": 100.0 * corr / max(tot, 1),
+                "recall": recall,
+                "soft_l1": (s_sum / s_n) if s_n > 0 else None,
+                "tokens": tot,
+            }
+            total_correct += corr; total_tokens += tot
+            total_soft_l1_sum += s_sum; total_soft_l1_n += s_n
+        router_stats = {
+            "blocks": blocks,
+            "overall": {
+                "accuracy": 100.0 * total_correct / max(total_tokens, 1),
+                "tokens": total_tokens,
+                "soft_l1": (total_soft_l1_sum / total_soft_l1_n
+                            if total_soft_l1_n > 0 else None),
+            },
+        }
+    return results, router_stats, skip_soft, timing
 
 
 def main():
@@ -153,6 +323,11 @@ def main():
                     help="Where to save eval_v3.json / eval_v3.txt")
     ap.add_argument("--tag", default="v3",
                     help="Filename tag: eval_<tag>.{json,txt}")
+    ap.add_argument("--spec-only", action="store_true",
+                    help="Disable shared expert and confidence gating for "
+                         "eval. Measures pure specialist mix (v4c-style "
+                         "inference) even on models trained with shared "
+                         "(v5_shared / v6a / v6b / v6c).")
     ap.add_argument("--runs", nargs="+", default=None,
                     help="Override run list. Format: 'name:dir[:ckpt]' each. "
                          "Default: v3 stage1/2.")
@@ -197,25 +372,47 @@ def main():
         print("=" * 78); print(f"### {name}"); print("=" * 78)
         m = load_model(run_dir, ckpt)
         t0 = time.time()
-        # Single pass — computes Normal MAE + router accuracy together
-        print("-- Normal + Router accuracy --")
-        res_normal, router_acc, conf = evaluate(m, ds, idxs, ranges, "normal", bins=BINS)
-        print(f"  Router: {router_acc:.1f}%  (tokens={conf.sum().item():,})")
-        for b in range(3):
-            n_b = conf[b, :].sum().item()
-            if n_b > 0:
-                print(f"    {labels[b]} recall: {100*conf[b,b].item()/n_b:.1f}%")
-        print("-- Oracle --")
-        res_oracle, _, _ = evaluate(m, ds, idxs, ranges, "oracle", bins=BINS)
-        print(f"  ({time.time()-t0:.0f}s)")
-        results[name] = {"Normal": res_normal, "Oracle": res_oracle,
-                          "router_acc": router_acc, "confusion": conf.tolist()}
+        # Unified per-sample loop: Normal + OracleHard (+ OracleSoft unless
+        # skipped for top_k=1 models). Saves a full dataset iteration and
+        # can save an extra oracle pass when the soft/hard gates collapse.
+        all_res, router_stats, skipped_soft, timing = evaluate_all_modes(
+            m, ds, idxs, ranges, bins=BINS, spec_only=args.spec_only)
+        if router_stats:
+            ov = router_stats["overall"]
+            print(f"  Router overall: acc={ov['accuracy']:.2f}%  "
+                  f"soft_l1={ov['soft_l1']:.4f}  (tokens={ov['tokens']:,})")
+            for bname, bstats in router_stats["blocks"].items():
+                rec_str = "  ".join(f"{labels[b]} {bstats['recall'][b]:.1f}%"
+                                    for b in range(3))
+                print(f"    {bname:<10} acc={bstats['accuracy']:5.2f}%  "
+                      f"soft_l1={bstats['soft_l1']:.4f}  "
+                      f"tokens={bstats['tokens']:>10,}  ({rec_str})")
+        # Per-mode forward-only inference time (GPU-sync).
+        for mode_name, tinfo in timing.items():
+            print(f"  Inference time [{mode_name:>10}]: "
+                  f"{tinfo['per_sample_s']*1000:.2f} ms/sample  "
+                  f"(total {tinfo['total_s']:.1f}s, "
+                  f"{tinfo['n_forwards']:,} forwards)")
+        if skipped_soft:
+            print("  (OracleSoft skipped — top_k=1 → identical to OracleHard)")
+        print(f"  ({time.time()-t0:.0f}s total)")
+
+        results[name] = {
+            "Normal": all_res["Normal"],
+            "OracleHard": all_res["OracleHard"],
+            "OracleSoft": all_res["OracleSoft"],
+            "router_stats": router_stats,
+            "oracle_soft_skipped": skipped_soft,
+            "timing": timing,
+        }
         del m; torch.cuda.empty_cache()
 
     # Build a text summary (also printed to stdout).
     buf = io.StringIO()
     def _p(s=""):
         print(s); buf.write(s + "\n")
+
+    MODES = ["Normal", "OracleHard", "OracleSoft"]
 
     _p("\n" + "=" * 100)
     _p(f"MAE table ({args.split} — {len(idxs):,} samples, no-clip)")
@@ -226,40 +423,71 @@ def main():
                  else f"{'—':>12}" for r in range_names))
     _p("-" * 100)
     for name, res in results.items():
-        for mode in ["Normal", "Oracle"]:
-            row = f"{name[:24]:<24} {mode:<4}"
+        for mode in MODES:
+            row = f"{name[:22]:<22} {mode:<11}"
             for r in range_names:
-                row += f"  {res[mode][r]:>12.4f}"
+                row += f"  {res[mode]['mae'][r]:>12.4f}"
             _p(row)
 
     _p("\n" + "=" * 100)
-    _p("Δ vs Baseline (negative = better)")
+    _p(f"RMSE table ({args.split} — {len(idxs):,} samples, no-clip)")
+    _p("=" * 100)
+    _p(f"{'Setting':<28}" + "  ".join(f"{r:>12}" for r in range_names))
+    _p("-" * 100)
+    for name, res in results.items():
+        for mode in MODES:
+            row = f"{name[:22]:<22} {mode:<11}"
+            for r in range_names:
+                row += f"  {res[mode]['rmse'][r]:>12.4f}"
+            _p(row)
+
+    _p("\n" + "=" * 100)
+    _p("Δ vs Baseline MAE (negative = better)")
     _p("=" * 100)
     base = BASELINE_MAE
     for name, res in results.items():
-        for mode in ["Normal", "Oracle"]:
-            row = f"{name[:24]:<24} {mode:<4}"
+        for mode in MODES:
+            row = f"{name[:22]:<22} {mode:<11}"
             for r in range_names:
                 if r in base:
-                    d = res[mode][r] - base[r]
+                    d = res[mode]["mae"][r] - base[r]
                     pct = 100*d/base[r]
                     row += f"  {d:>+7.4f} ({pct:+6.1f}%)"
                 else:
                     row += f"  {'—':>17}"
             _p(row)
 
-    _p("\n" + "=" * 78)
-    _p("Router accuracy summary")
-    _p("=" * 78)
+    _p("\n" + "=" * 100)
+    _p("Inference time — GPU-sync forward-only, ms per sample")
+    _p("=" * 100)
+    _p(f"{'Setting':<28}" + "  ".join(f"{m:>14}" for m in MODES))
+    _p("-" * 100)
     for name, res in results.items():
-        conf = torch.tensor(res["confusion"])
-        recalls = []
-        for b, lb in enumerate(labels):
-            n_b = conf[b, :].sum().item()
-            if n_b > 0:
-                recalls.append(f"{lb} {100*conf[b,b].item()/n_b:.1f}%")
-        _p(f"  {name}: overall {res['router_acc']:.1f}%   "
-           f"({'   '.join(recalls)})   tokens={conf.sum().item():,}")
+        row = f"{name[:22]:<28}"
+        for mode in MODES:
+            t = res["timing"].get(mode, {})
+            ms = t.get("per_sample_s", float("nan")) * 1000
+            row += f"  {ms:>14.2f}"
+        _p(row)
+
+    _p("\n" + "=" * 110)
+    _p("Router accuracy summary — per MoE block + weighted overall")
+    _p("=" * 110)
+    for name, res in results.items():
+        rs = res.get("router_stats")
+        if not rs:
+            _p(f"  {name}: (no router stats — model has no MoE?)")
+            continue
+        _p(f"  {name}:")
+        for bname, bstats in rs["blocks"].items():
+            rec_str = "  ".join(f"{labels[b]} {bstats['recall'][b]:5.1f}%"
+                                for b in range(3))
+            _p(f"    {bname:<10} acc={bstats['accuracy']:6.2f}%  "
+               f"soft_l1={bstats['soft_l1']:.4f}  "
+               f"tokens={bstats['tokens']:>10,}  ({rec_str})")
+        _p(f"    {'OVERALL':<10} acc={rs['overall']['accuracy']:6.2f}%  "
+           f"soft_l1={rs['overall']['soft_l1']:.4f}  "
+           f"tokens={rs['overall']['tokens']:>10,}  (token-weighted)")
 
     # Persist: JSON (machine) + TXT (human). Matches
     # output/analysis/eval_full_test.json layout used by earlier experiments.
@@ -268,12 +496,14 @@ def main():
         "split": args.split,
         "n_samples": len(idxs),
         "results": {
-            "Baseline @ e46": {"Normal": BASELINE_MAE},
+            "Baseline @ e46": {"Normal": {"mae": BASELINE_MAE, "rmse": {}}},
             **{name: {
                 "Normal": res["Normal"],
-                "Oracle": res["Oracle"],
-                "router_acc": res["router_acc"],
-                "confusion": res["confusion"],
+                "OracleHard": res["OracleHard"],
+                "OracleSoft": res["OracleSoft"],
+                "oracle_soft_skipped": res["oracle_soft_skipped"],
+                "router_stats": res["router_stats"],
+                "timing": res["timing"],
             } for name, res in results.items()},
         },
     }

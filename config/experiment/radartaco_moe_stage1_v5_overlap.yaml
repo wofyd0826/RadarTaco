@@ -1,0 +1,67 @@
+# @package _global_
+# MoE v5 stage-1 (teacher forcing) — overlap bins + sigmoid + BCE per bin.
+#
+# Same shape as radartaco_moe_stage1_v4c but with:
+#   • moe_router_gt_type: overlap  (v4c: soft)
+#   • moe_overlap_bins: [[0,25],[15,55],[45,100]]
+#   • Router loss becomes BCE-per-bin automatically (loss factory dispatches
+#     on router_gt_type reported by the model).
+#
+# Rationale: pixel-fraction (soft CE) targets are still argmax-unstable at
+# 20 m / 50 m boundaries, capping router acc near 90% and yielding a
+# systematic mid-bias. Overlap bins remove the argmax flip (a boundary
+# token IS "near" AND "mid" at the same time) and BCE removes softmax's
+# zero-sum competition. Combined effect on the router-only pretrain: mid
+# recall jumped 81 → 90% with no drop on near/far.
+#
+# Run order:
+#   1. python scripts/train.py +experiment=radartaco_moe_stage1_v5_overlap
+#   2. python scripts/train.py +experiment=radartaco_moe_stage2_v5_overlap
+defaults:
+  - override /model: radartaco_moe_v5_overlap
+  - override /dataset: nuscenes
+  - override /training: default
+  - override /loss:  default
+
+dataset:
+  dense_gt_dir: depth_edge_res
+  lidar_gt_dir: depth_lidar
+  val_lidar_gt_dir: depth_lidar
+
+model:
+  moe_stage: 1
+  moe_use_shared: false
+  moe_top_k: 2
+  moe_expert_ch_ratio: 0.5
+  moe_router_gt_type: overlap
+  moe_overlap_bins:
+    - [0.0, 25.0]
+    - [15.0, 55.0]
+    - [45.0, 100.0]
+
+loss:
+  w_lidar: 1.0
+  lam: 0.0
+  w_grad_shape: 100.0
+  grad_shape_scales: 4
+  grad_shape_use_log: true
+  w_shape_global: 0.0
+  w_shape_grid: 0.0
+  w_anchored_global: 0.0
+  w_anchored_grid: 0.0
+  w_affine_anchor: 0.0
+  lidar_consistency_threshold: 0.0
+  w_anti_stripe: 0.0
+  w_router: 10.0                              # BCE per bin — same scale as CE in v4c
+
+training:
+  epochs: 30
+
+wandb:
+  name: radartaco_moe_stage1_v5_overlap
+  tags: [moe, stage1, teacher-forcing, no-shared, router-mlp3x3, top_k2, expert-ratio-half, overlap-bins, bce, v5]
+  notes: >
+    Stage-1 MoE v5 — overlap bins [[0,25],[15,55],[45,100]] + BCE per bin
+    (sigmoid gate). Teacher-force gate uses renormalized overlap target.
+    30 epoch from scratch. Directly comparable to stage1_v4c which used
+    hard bins + soft CE (softmax).

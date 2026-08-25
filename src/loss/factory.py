@@ -172,6 +172,51 @@ class ComposedLoss(nn.Module):
         # mixed tokens unsupervised.
         moe_pixel_bin_mask: bool = False,
         moe_pixel_bin_mask_bins: Optional[Tuple[float, ...]] = None,
+        # Auxiliary loss on the shared-only depth prediction. When > 0 and
+        # the model returns `depth_shared` (requires `moe_shared_aux=True`
+        # on the model), the same task-loss subset (L1_lidar + grad_shape,
+        # weighted by `w_lidar` and `w_grad_shape` respectively) is
+        # computed on `depth_shared` and added to `loss_total` with weight
+        # `w_shared_aux`. This trains the shared expert as a standalone
+        # generalist depth predictor rather than as a residual add-on.
+        w_shared_aux: float = 0.0,
+        # Router self-distillation. When > 0 and the model returns
+        # `router_logits` + `depth` + `moe_bins`, add a soft-CE term whose
+        # target is the pixel-bin FRACTION of the model's OWN final depth
+        # prediction (`pred["depth"]`, detached), pooled to each router
+        # block's token grid. Teaches the router to route CONSISTENTLY with
+        # what the model actually predicts, rather than only matching the
+        # (noisy at boundaries) GT bin. Can be combined with `w_router` (GT
+        # anchor) or used alone (self-dist only). Detach on `depth` is
+        # critical — gradient must NOT flow router→depth→target→router.
+        w_router_selfdist: float = 0.0,
+        # Task-aware router loss. When > 0 and the model returns
+        # `depth_per_spec` (requires `moe_per_spec_aux=True` on the model),
+        # compute per-token per-specialist LiDAR L1 error, softmax(-err / T)
+        # over specialists to build a soft target for the router (low-error
+        # specialist gets high probability), and add soft-CE from router
+        # probs to that target. Teaches the router to route to whichever
+        # specialist actually predicts best per token, complementing (or
+        # replacing) the pixel-bin CE (`w_router`). Detach on per-spec
+        # errors — gradient flows to specialists via their own task loss,
+        # not through the router target.
+        w_task_router: float = 0.0,
+        # Temperature for softmax(-err / T) target sharpness. Small T
+        # (e.g., 0.5) → one-hot on best specialist; large T (e.g., 3.0) →
+        # nearly uniform. Default 1.0 = mean-error-scale.
+        task_router_temperature: float = 1.0,
+        # Router CE class-balance / focal modifiers. Both act on the router
+        # softmax + CE dispatch (gt_type ∈ {"hard","soft"}) and are ignored
+        # for "overlap" (which uses BCE).
+        #   router_class_weight — per-expert weight for the CE term. Length
+        #       must equal n_experts (typically 3: near/mid/far). Applied
+        #       as `-Σ_k w[k] · target[k] · log softmax(logits)[k]`.
+        #   router_focal_gamma — focal-loss γ. When > 0, each per-class term
+        #       is scaled by `(1 - p[k])^γ` (per-class variant that handles
+        #       soft targets natively). γ=0 or None disables focal.
+        # Both off → identical to F.cross_entropy (verified in unit test).
+        router_class_weight: Optional[list] = None,
+        router_focal_gamma: float = 0.0,
     ) -> None:
         super().__init__()
         self.lam = lam
@@ -306,6 +351,7 @@ class ComposedLoss(nn.Module):
         self.depth_bin_max = (float(depth_bin_max)
                               if depth_bin_max is not None else None)
         self.w_router = float(w_router)
+        self.w_router_selfdist = float(w_router_selfdist)
         self.moe_pixel_bin_mask = bool(moe_pixel_bin_mask)
         if self.moe_pixel_bin_mask:
             assert moe_pixel_bin_mask_bins is not None and len(moe_pixel_bin_mask_bins) >= 2, \
@@ -316,6 +362,16 @@ class ComposedLoss(nn.Module):
             )
         else:
             self._moe_pix_mask_bins = None
+        self.w_shared_aux = float(w_shared_aux)
+        self.w_task_router = float(w_task_router)
+        self.task_router_temperature = float(task_router_temperature)
+        self.router_focal_gamma = float(router_focal_gamma or 0.0)
+        if router_class_weight is not None:
+            cw = torch.tensor([float(x) for x in router_class_weight],
+                              dtype=torch.float32)
+            self.register_buffer("_router_class_weight", cw)
+        else:
+            self._router_class_weight = None
 
     # ----------------------------------------------------- main forward --
     def forward(
@@ -601,17 +657,163 @@ class ComposedLoss(nn.Module):
                 and isinstance(pred, dict)
                 and "router_logits" in pred
                 and "router_gts" in pred):
+            # Loss dispatch: "hard"/"soft" → softmax + CE; "overlap" → sigmoid
+            # + BCE per bin (independent). "overlap" needs BCE because its
+            # target is per-bin membership (sum can be > 1) — softmax + CE
+            # can't represent that. The router_gt_type flag flows from the
+            # model's `MoEFusionBlock.router_gt_type` via pred["router_gt_type"];
+            # legacy models omit it, in which case fall back to CE.
+            gt_type = pred.get("router_gt_type", "hard")
             ce_list = []
             for lg, gt in zip(pred["router_logits"], pred["router_gts"]):
                 if gt is None:                # stage-2 / eval — no GT for this block
                     continue
-                ce_list.append(F.cross_entropy(lg, gt))
+                if gt_type == "overlap":
+                    ce_list.append(
+                        F.binary_cross_entropy_with_logits(lg, gt))
+                else:
+                    ce_list.append(self._router_ce(lg, gt, gt_type))
             if ce_list:
                 l_router = torch.stack(ce_list).mean()
                 total = total + self.w_router * l_router
 
+        # ------ Router self-distillation (target = model's own depth bins) --
+        # For each MoE block, bucketize `pred["depth"]` (detached) with the
+        # model's `moe_bins`, pool to the block's token grid to get a soft
+        # pixel-bin fraction (sums to 1 along K), then soft-CE against the
+        # router logits. The router is trained to route CONSISTENTLY with
+        # what the model actually predicts. Detach is critical: gradient
+        # must not flow router→depth→target→router (would cause collapse).
+        l_router_selfdist = zero
+        if (self.w_router_selfdist > 0
+                and isinstance(pred, dict)
+                and "router_logits" in pred
+                and "depth" in pred
+                and "moe_bins" in pred):
+            depth_final = pred["depth"]                            # (B, 1, H, W)
+            bins = pred["moe_bins"]
+            K = len(bins) - 1
+            edges = torch.tensor(list(bins), device=depth_final.device,
+                                 dtype=torch.float32)
+            # Detached pixel-bin hard labels from final depth.
+            with torch.no_grad():
+                ds = depth_final.detach().squeeze(1)               # (B, H, W)
+                pix_bin = torch.zeros_like(ds, dtype=torch.long)
+                for i in range(K):
+                    pix_bin = torch.where(
+                        (ds >= float(edges[i])) & (ds < float(edges[i + 1])),
+                        pix_bin.new_tensor(i), pix_bin)
+                # Depth ≥ last edge falls into the last bin.
+                pix_bin = torch.where(
+                    ds >= float(edges[-1]), pix_bin.new_tensor(K - 1), pix_bin)
+                onehot = F.one_hot(pix_bin, num_classes=K) \
+                          .permute(0, 3, 1, 2).float()             # (B, K, H, W)
+
+            sd_list = []
+            for lg in pred["router_logits"]:
+                if lg is None:
+                    continue
+                tok_hw = lg.shape[-2:]
+                with torch.no_grad():
+                    target_frac = F.adaptive_avg_pool2d(onehot, tok_hw)
+                # Soft CE (KL up to a target-entropy constant):
+                #   L = -Σ_k target_frac[k] · log_softmax(logits)[k]
+                log_probs = F.log_softmax(lg, dim=1)
+                sd_list.append(-(target_frac * log_probs).sum(dim=1).mean())
+            if sd_list:
+                l_router_selfdist = torch.stack(sd_list).mean()
+                total = total + self.w_router_selfdist * l_router_selfdist
+
+        # ------ Auxiliary shared-only task loss (MoE with `moe_shared_aux`) --
+        # Trains the shared expert as a standalone generalist by feeding
+        # `depth_shared` (shared-only decoded depth) through the SAME core
+        # supervision terms — L1 vs sparse LiDAR + gradient-shape vs dense
+        # GT — that the main path uses. Real samples only; sim samples
+        # don't have LiDAR here.
+        l_shared_aux = zero
+        if (self.w_shared_aux > 0
+                and isinstance(pred, dict)
+                and "depth_shared" in pred
+                and real_idx.numel() > 0):
+            ds_all = pred["depth_shared"]
+            ds = ds_all[real_idx]
+            aux_terms = []
+            if self.w_lidar > 0:
+                aux_terms.append(
+                    self.w_lidar * self.l1(
+                        ds,
+                        batch["depth_gt_lidar"][real_idx],
+                        batch["valid_mask_lidar"][real_idx],
+                    )
+                )
+            if self.grad_shape is not None and self.w_grad_shape > 0:
+                aux_terms.append(
+                    self.w_grad_shape * self.grad_shape(
+                        ds,
+                        batch["depth_gt_dense"][real_idx],
+                        mask=None,
+                    )
+                )
+            if aux_terms:
+                l_shared_aux = torch.stack(aux_terms).sum()
+                total = total + w_real * self.w_shared_aux * l_shared_aux
+
+        # ------ Task-aware router loss (requires `moe_per_spec_aux`) --------
+        # For each MoE block, softmax over specialists of −per_spec_pool_err
+        # is the target the router should match (concentrate probability
+        # on whichever specialist would have produced the lowest task loss
+        # on each token). Uses LiDAR sparse GT as the error reference —
+        # dense edge-res GT is smoothed and less faithful to metric error.
+        # Only computed on real (non-sim) samples.
+        l_task_router = zero
+        if (self.w_task_router > 0
+                and isinstance(pred, dict)
+                and "depth_per_spec" in pred
+                and pred.get("router_logits")
+                and real_idx.numel() > 0):
+            depth_per_spec = pred["depth_per_spec"]      # list of K, each (B, 1, H, W)
+            K_spec = len(depth_per_spec)
+            gt_lidar_r = batch["depth_gt_lidar"][real_idx]        # (Br, 1, H, W)
+            valid_r    = batch["valid_mask_lidar"][real_idx].float()  # (Br, 1, H, W)
+            # Per-spec per-pixel L1 error, masked to valid LiDAR only.
+            with torch.no_grad():
+                errs = []
+                for k in range(K_spec):
+                    dsk = depth_per_spec[k][real_idx]              # (Br, 1, H, W)
+                    err_k = (dsk - gt_lidar_r).abs() * valid_r     # 0 where invalid
+                    errs.append(err_k)
+                # (Br, K, H, W)
+                err_pix = torch.cat(errs, dim=1)
+            router_logits = pred["router_logits"]
+            tr_terms = []
+            for lg in router_logits:
+                if lg is None:
+                    continue
+                lg_r = lg[real_idx]                                # (Br, K, h, w)
+                tok_hw = lg_r.shape[-2:]
+                with torch.no_grad():
+                    # Pool per-spec error to token grid — sum error / sum valid.
+                    err_sum_tok = F.adaptive_avg_pool2d(err_pix, tok_hw)
+                    valid_sum_tok = F.adaptive_avg_pool2d(valid_r, tok_hw)
+                    # Tokens with no valid LiDAR pixel → excluded from loss.
+                    tok_valid = (valid_sum_tok.squeeze(1) > 0)      # (Br, h, w)
+                    # Per-token per-spec mean error (m); divide err by valid frac
+                    err_mean_tok = err_sum_tok / valid_sum_tok.clamp_min(1e-6)
+                    # Target: softmax(-err / T) over specialists → prob dist.
+                    target = F.softmax(-err_mean_tok / self.task_router_temperature,
+                                       dim=1)                       # (Br, K, h, w)
+                # Soft CE against target on valid tokens.
+                log_probs = F.log_softmax(lg_r, dim=1)              # (Br, K, h, w)
+                loss_per_tok = -(target * log_probs).sum(dim=1)     # (Br, h, w)
+                if tok_valid.any():
+                    tr_terms.append(loss_per_tok[tok_valid].mean())
+            if tr_terms:
+                l_task_router = torch.stack(tr_terms).mean()
+                total = total + w_real * self.w_task_router * l_task_router
+
         return {
             "loss_total": total,
+            "loss_shared_aux": l_shared_aux.detach() if torch.is_tensor(l_shared_aux) else torch.tensor(0.0),
             "loss_lidar": l_lidar.detach(),
             "loss_dense": l_dense.detach(),
             "loss_smooth": l_smooth.detach(),
@@ -630,7 +832,43 @@ class ComposedLoss(nn.Module):
             "loss_grad_sign":    l_grad_sign.detach()  if torch.is_tensor(l_grad_sign)  else torch.tensor(0.0),
             "loss_grad_cos":     l_grad_cos.detach()   if torch.is_tensor(l_grad_cos)   else torch.tensor(0.0),
             "loss_router":       l_router.detach() if torch.is_tensor(l_router) else torch.tensor(0.0),
+            "loss_router_selfdist": l_router_selfdist.detach() if torch.is_tensor(l_router_selfdist) else torch.tensor(0.0),
+            "loss_task_router": l_task_router.detach() if torch.is_tensor(l_task_router) else torch.tensor(0.0),
         }
+
+    # -------------------------------------------- router CE dispatch ---
+    def _router_ce(
+        self,
+        logits: torch.Tensor,          # (B, K, H, W)
+        target: torch.Tensor,          # (B, H, W) int64 (hard) or (B, K, H, W) float (soft)
+        gt_type: str,
+    ) -> torch.Tensor:
+        """Router CE with optional per-class weight + focal factor.
+
+        Equivalent to `F.cross_entropy(logits, target)` when both
+        `router_class_weight` and `router_focal_gamma` are unset (verified
+        by unit test). Handles soft (K-plane) and hard (index) targets in
+        a unified per-class formulation:
+            L = -Σ_k w[k] · (1 - p[k])^γ · t[k] · log softmax(logits)[k]
+        where t is one-hot(target) for hard and target itself for soft.
+        """
+        K = logits.shape[1]
+        log_p = F.log_softmax(logits, dim=1)                # (B, K, H, W)
+        if gt_type == "soft":
+            soft_t = target                                 # (B, K, H, W) float
+        else:                                               # hard
+            soft_t = F.one_hot(target.long(), num_classes=K) \
+                      .permute(0, 3, 1, 2).to(log_p.dtype)  # (B, K, H, W)
+        scale = torch.ones_like(log_p)
+        if self.router_focal_gamma > 0.0:
+            p = log_p.exp()
+            scale = scale * (1.0 - p).clamp_min(0.0).pow(self.router_focal_gamma)
+        if self._router_class_weight is not None:
+            cw = self._router_class_weight.to(log_p.device, log_p.dtype) \
+                     .view(1, K, 1, 1)
+            scale = scale * cw
+        per_pix = -(scale * soft_t * log_p).sum(dim=1)      # (B, H, W)
+        return per_pix.mean()
 
     # ----------------------------------------------- multi-scale helper --
     def _multi_scale_loss(
@@ -752,4 +990,11 @@ def build_loss(cfg) -> nn.Module:
         moe_pixel_bin_mask=bool(cfg.get("moe_pixel_bin_mask", False)),
         moe_pixel_bin_mask_bins=(tuple(float(x) for x in cfg.get("moe_pixel_bin_mask_bins"))
                                   if cfg.get("moe_pixel_bin_mask_bins") is not None else None),
+        w_shared_aux=float(cfg.get("w_shared_aux", 0.0)),
+        w_router_selfdist=float(cfg.get("w_router_selfdist", 0.0)),
+        w_task_router=float(cfg.get("w_task_router", 0.0)),
+        task_router_temperature=float(cfg.get("task_router_temperature", 1.0)),
+        router_class_weight=(list(cfg.get("router_class_weight"))
+                             if cfg.get("router_class_weight") is not None else None),
+        router_focal_gamma=float(cfg.get("router_focal_gamma", 0.0)),
     )

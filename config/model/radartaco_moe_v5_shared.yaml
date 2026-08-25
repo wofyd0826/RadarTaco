@@ -1,0 +1,53 @@
+# RadarTaco MoE v5_shared — v4c + shared expert enabled.
+#
+# Sole difference from v4c: moe_use_shared: false → true.
+#
+# What "shared expert" does (in the current MoEFusionBlock implementation):
+#   The shared expert is applied UNCONDITIONALLY on top of the specialist
+#   mixture:
+#     mixed = feat
+#           + Σ_k gate_k · (specialist_k(feat) - feat)   ← router-selected
+#           + (shared(feat) - feat)                       ← always active
+#
+#   That is, `shared` learns a generalist depth-fusion residual applied
+#   uniformly to every token, on top of whichever specialist(s) the router
+#   picked. It is NOT gate-selected — the router does not "decide" between
+#   specialist and shared. Instead, shared functions as a safety net that
+#   softens per-token cost when specialists are mis-assigned by the router.
+#
+# Motivation (from the routing diagnostics):
+#   Router accuracy is stuck at ~90% across every feature source we've
+#   tried (frozen depth encoder, fresh RGB, mono depth, DINOv2). The last
+#   ~10% is a label-ambiguity ceiling, not a feature problem.
+#
+#   Under v4c (no shared), adjacent misroutes cost 3-8 m/token and cross-
+#   bin misroutes cost 12-24 m/token — specialists are brittle outside
+#   their bin. Adding a shared expert provides a baseline-like fallback
+#   that partially handles tokens whose specialist choice was wrong, so
+#   misroute cost drops without needing router improvement.
+#
+# All other MoE axes match v4c so the shared-vs-no-shared difference is
+# isolated.
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 8
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+
+# ── MoE options ──
+moe_at_l: [2]
+moe_n_experts: 3
+moe_use_shared: true          # ← v5_shared: enable shared expert (v4c had false)
+moe_top_k: 2
+moe_stage: 2
+moe_bins: [0.0, 20.0, 50.0, 100.0]
+moe_router_arch: mlp3x3
+moe_expert_ch_ratio: 0.5
+moe_router_gt_type: soft

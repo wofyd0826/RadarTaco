@@ -1,0 +1,52 @@
+# RadarTaco MoE v6a_confshared — v5_shared + conservation confidence gating.
+#
+# Sole difference from v5_shared: moe_shared_gate_mode: always_on → confidence.
+#
+# What "confidence" mode does (see MoEFusionBlock.forward):
+#   α = (K · max(gate) − 1) / (K − 1)   ∈ [0, 1]
+#   specialist_gate  ← specialist_gate · α        (scaled down when uncertain)
+#   shared_weight    ← 1 − α                      (rises when uncertain)
+#
+#   Applied in BOTH training and inference (conservation: total = 1).
+#
+#   Interpretation: router uncertainty (low max_prob → α → 0) redirects
+#   the token from the specialist mixture to the shared expert, acting
+#   as an explicit fallback. Confident tokens (max_prob → 1, α → 1) run
+#   through specialists only (shared contribution → 0).
+#
+#   Total per-token contribution is CONSERVED (α + (1−α) = 1), unlike
+#   v5_shared's always_on shared which added an extra baseline residual
+#   on top of specialists regardless of routing confidence.
+#
+# Trade-off: shared receives gradient ONLY on tokens where α < 1 (mixed
+# targets in stage 1, uncertain-router tokens in stage 2). This
+# concentrates its learning signal on boundary/ambiguous cases — it
+# becomes a "boundary specialist" rather than a broad generalist. v6b
+# is the alternative that trains shared broadly.
+#
+# All other MoE axes match v5_shared so the always_on vs confidence
+# comparison is isolated.
+name: radartaco
+radar_encoder: gnn
+k_neighbors: 8
+mlp_hidden: 128
+a_l: [48.0, 32.0, 16.0]
+radar_channels: [64, 128, 512]
+attn_heads: 4
+pretrained_image_encoder: true
+output_mode: metric
+min_depth_clip: 0.5
+multi_scale: false
+multi_scale_levels: [2, 4, 8, 16]
+
+# ── MoE options ──
+moe_at_l: [2]
+moe_n_experts: 3
+moe_use_shared: true
+moe_top_k: 2
+moe_stage: 2
+moe_bins: [0.0, 20.0, 50.0, 100.0]
+moe_router_arch: mlp3x3
+moe_expert_ch_ratio: 0.5
+moe_router_gt_type: soft
+moe_shared_gate_mode: confidence   # ← v6a: conservation in train + infer
